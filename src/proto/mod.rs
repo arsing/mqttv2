@@ -5,8 +5,11 @@
 use std::convert::TryInto;
 
 use bytes::{Buf, BufMut};
-#[cfg(feature = "serde1")]
-use serde::{Deserialize, Serialize};
+
+mod byte_str;
+pub use byte_str::{
+    ByteStr,
+};
 
 mod packet;
 pub use packet::{
@@ -25,8 +28,8 @@ pub(crate) use packet::PacketMeta;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientId {
     ServerGenerated,
-    IdWithCleanSession(String),
-    IdWithExistingSession(String),
+    IdWithCleanSession(ByteStr),
+    IdWithExistingSession(ByteStr),
 }
 
 /// The return code for a connection attempt
@@ -101,7 +104,7 @@ impl Default for Utf8StringDecoder {
 }
 
 impl tokio_util::codec::Decoder for Utf8StringDecoder {
-    type Item = String;
+    type Item = ByteStr;
     type Error = DecodeError;
 
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -120,10 +123,7 @@ impl tokio_util::codec::Decoder for Utf8StringDecoder {
                         return Ok(None);
                     }
 
-                    let s = match std::str::from_utf8(&src.split_to(*len)) {
-                        Ok(s) => s.to_string(),
-                        Err(err) => return Err(DecodeError::StringNotUtf8(err)),
-                    };
+                    let s = src.split_to(*len).freeze().try_into().map_err(DecodeError::StringNotUtf8)?;
                     *self = Utf8StringDecoder::Empty;
                     return Ok(Some(s));
                 }
@@ -132,7 +132,7 @@ impl tokio_util::codec::Decoder for Utf8StringDecoder {
     }
 }
 
-fn encode_utf8_str<B>(item: &str, dst: &mut B) -> Result<(), EncodeError>
+fn encode_utf8_str<B>(item: &ByteStr, dst: &mut B) -> Result<(), EncodeError>
 where
     B: ByteBuf,
 {
@@ -230,7 +230,6 @@ where
 
 /// A packet identifier. Two-byte unsigned integer that cannot be zero.
 #[derive(Clone, Copy, Debug, Eq, Ord, Hash, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "serde1", derive(Deserialize, Serialize))]
 pub struct PacketIdentifier(u16);
 
 impl PacketIdentifier {
@@ -293,7 +292,7 @@ pub enum DecodeError {
         remaining_length: usize,
     },
     UnrecognizedProtocolLevel(u8),
-    UnrecognizedProtocolName(String),
+    UnrecognizedProtocolName(ByteStr),
     UnrecognizedQoS(u8),
     ZeroPacketIdentifier,
 }
@@ -326,12 +325,12 @@ impl std::fmt::Display for DecodeError {
                 flags,
                 remaining_length,
             } => write!(
-					f,
-					"could not identify packet with type 0x{:1X}, flags 0x{:1X} and remaining length {}",
-					packet_type,
-					flags,
-					remaining_length,
-				),
+                f,
+                "could not identify packet with type 0x{:1X}, flags 0x{:1X} and remaining length {}",
+                packet_type,
+                flags,
+                remaining_length,
+            ),
             DecodeError::UnrecognizedProtocolLevel(level) => {
                 write!(f, "unexpected protocol level {:?}", level)
             }

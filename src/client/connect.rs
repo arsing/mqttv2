@@ -22,7 +22,7 @@ where
     Framed {
         framed: crate::logging_framed::LoggingFramed<<IoS as super::IoSource>::Io>,
         framed_state: FramedState,
-        password: Option<String>,
+        password: Option<crate::proto::ByteStr>,
     },
 }
 
@@ -84,7 +84,7 @@ where
         &'a mut self,
         cx: &mut std::task::Context<'_>,
 
-        username: Option<&str>,
+        username: Option<&crate::proto::ByteStr>,
         will: Option<&crate::proto::Publication>,
         client_id: &mut crate::proto::ClientId,
         keep_alive: std::time::Duration,
@@ -151,12 +151,12 @@ where
                 } => match std::pin::Pin::new(&mut *framed).poll_ready(cx) {
                     std::task::Poll::Ready(Ok(())) => {
                         let packet = crate::proto::Packet::Connect(crate::proto::Connect {
-                            username: username.map(ToOwned::to_owned),
+                            username: username.cloned(),
                             password: password.clone(),
                             will: will.cloned(),
                             client_id: client_id.clone(),
                             keep_alive,
-                            protocol_name: crate::PROTOCOL_NAME.to_string(),
+                            protocol_name: crate::PROTOCOL_NAME,
                             protocol_level: crate::PROTOCOL_LEVEL,
                         });
 

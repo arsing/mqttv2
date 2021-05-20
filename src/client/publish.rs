@@ -45,33 +45,31 @@ impl State {
         let mut publication_received = None;
 
         match packet.take() {
-            Some(crate::proto::Packet::PubAck(crate::proto::PubAck { packet_identifier })) => {
-                match self.waiting_to_be_acked.remove(&packet_identifier) {
-                    Some((ack_sender, _)) => {
-                        packet_identifiers.discard(packet_identifier);
+            Some(crate::proto::Packet::PubAck(crate::proto::PubAck { packet_identifier })) =>
+                if let Some((ack_sender, _)) = self.waiting_to_be_acked.remove(&packet_identifier) {
+                    packet_identifiers.discard(packet_identifier);
 
-                        match ack_sender.send(()) {
-						Ok(()) => (),
-						Err(()) => log::debug!("could not send ack for publish request because ack receiver has been dropped"),
-					}
+                    match ack_sender.send(()) {
+                        Ok(()) => (),
+                        Err(()) => log::debug!("could not send ack for publish request because ack receiver has been dropped"),
                     }
-                    None => log::warn!("ignoring PUBACK for a PUBLISH we never sent"),
                 }
-            }
+                else {
+                    log::warn!("ignoring PUBACK for a PUBLISH we never sent");
+                },
 
-            Some(crate::proto::Packet::PubComp(crate::proto::PubComp { packet_identifier })) => {
-                match self.waiting_to_be_completed.remove(&packet_identifier) {
-                    Some((ack_sender, _)) => {
-                        packet_identifiers.discard(packet_identifier);
+            Some(crate::proto::Packet::PubComp(crate::proto::PubComp { packet_identifier })) =>
+                if let Some((ack_sender, _)) = self.waiting_to_be_completed.remove(&packet_identifier) {
+                    packet_identifiers.discard(packet_identifier);
 
-                        match ack_sender.send(()) {
-						Ok(()) => (),
-						Err(()) => log::debug!("could not send ack for publish request because ack receiver has been dropped"),
-					}
+                    match ack_sender.send(()) {
+                        Ok(()) => (),
+                        Err(()) => log::debug!("could not send ack for publish request because ack receiver has been dropped"),
                     }
-                    None => log::warn!("ignoring PUBCOMP for a PUBREL we never sent"),
                 }
-            }
+                else {
+                    log::warn!("ignoring PUBCOMP for a PUBREL we never sent");
+                },
 
             Some(crate::proto::Packet::Publish(crate::proto::Publish {
                 packet_identifier_dup_qos,
@@ -134,12 +132,12 @@ impl State {
             },
 
             Some(crate::proto::Packet::PubRec(crate::proto::PubRec { packet_identifier })) => {
-                match self.waiting_to_be_acked.remove(&packet_identifier) {
-                    Some((ack_sender, packet)) => {
-                        self.waiting_to_be_completed
-                            .insert(packet_identifier, (ack_sender, packet));
-                    }
-                    None => log::warn!("ignoring PUBREC for a PUBLISH we never sent"),
+                if let Some((ack_sender, packet)) = self.waiting_to_be_acked.remove(&packet_identifier) {
+                    self.waiting_to_be_completed
+                        .insert(packet_identifier, (ack_sender, packet));
+                }
+                else {
+                    log::warn!("ignoring PUBREC for a PUBLISH we never sent");
                 }
 
                 packets_waiting_to_be_sent.push(crate::proto::Packet::PubRel(
@@ -188,9 +186,9 @@ impl State {
                     ));
 
                     match ack_sender.send(()) {
-						Ok(()) => (),
-						Err(()) => log::debug!("could not send ack for publish request because ack receiver has been dropped"),
-					}
+                        Ok(()) => (),
+                        Err(()) => log::debug!("could not send ack for publish request because ack receiver has been dropped"),
+                    }
                 }
 
                 crate::proto::QoS::AtLeastOnce => {

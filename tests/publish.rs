@@ -573,7 +573,7 @@ async fn should_reject_invalid_publications() {
         .expect("connection broken while there were still steps remaining on the server");
 
     match publish_future.await {
-		Err(mqtt3::PublishError::EncodePacket(_, mqtt3::proto::EncodeError::StringTooLarge(_))) => (),
-		result => panic!("expected client.publish() to fail with EncodePacket(StringTooLarge) but it returned {:?}", result),
-	}
+        Err(mqtt3::PublishError::EncodePacket(_, mqtt3::proto::EncodeError::StringTooLarge(_))) => (),
+        result => panic!("expected client.publish() to fail with EncodePacket(StringTooLarge) but it returned {:?}", result),
+    }
 }

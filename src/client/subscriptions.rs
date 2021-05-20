@@ -1,6 +1,6 @@
 #[derive(Debug)]
 pub(super) struct State {
-    subscriptions: std::collections::BTreeMap<String, crate::proto::QoS>,
+    subscriptions: std::collections::BTreeMap<crate::proto::ByteStr, crate::proto::QoS>,
 
     subscriptions_updated_send: futures_channel::mpsc::Sender<SubscriptionUpdate>,
     subscriptions_updated_recv: futures_channel::mpsc::Receiver<SubscriptionUpdate>,
@@ -229,7 +229,9 @@ impl State {
             // So we make an intermediate set of all subscriptions and unsubscriptions and if for same topic an Unsubscribe is before a Subscribe, only Subscribe remains in the intermediate set
             // and if a Unsubscribe is set after Subscribe they are both removed
             // then send a SUBSCRIBE packet for any net new subscriptions and an UNSUBSCRIBE packet for any net new unsubscriptions.
+            #[allow(clippy::mutable_key_type)]
             let mut target_subscriptions = std::collections::BTreeMap::new();
+            #[allow(clippy::mutable_key_type)]
             let mut target_unsubscriptions = std::collections::BTreeMap::new();
 
             while let Some(subscription_update) =
@@ -239,12 +241,12 @@ impl State {
                     SubscriptionUpdate::Subscribe(subscribe_to) => {
                         target_unsubscriptions.remove(&subscribe_to.topic_filter);
                         target_subscriptions.insert(
-                            std::borrow::Cow::Owned(subscribe_to.topic_filter),
+                            subscribe_to.topic_filter.clone(),
                             subscribe_to.qos,
                         );
                     }
                     SubscriptionUpdate::Unsubscribe(unsubscribe_from) => {
-                        if target_subscriptions.remove(&*unsubscribe_from).is_none() {
+                        if target_subscriptions.remove(&unsubscribe_from).is_none() {
                             target_unsubscriptions.insert(unsubscribe_from, true);
                         }
                     }
@@ -254,7 +256,7 @@ impl State {
             let mut pending_subscriptions: std::collections::VecDeque<_> = Default::default();
             for (topic_filter, &qos) in &target_subscriptions {
                 pending_subscriptions.push_back(crate::proto::SubscribeTo {
-                    topic_filter: topic_filter.clone().into_owned(),
+                    topic_filter: topic_filter.clone(),
                     qos,
                 });
             }
@@ -381,6 +383,7 @@ impl State {
         packet_identifiers: &mut super::PacketIdentifiers,
     ) -> impl Iterator<Item = crate::proto::Packet> {
         if reset_session {
+            #[allow(clippy::mutable_key_type)]
             let mut subscriptions = std::mem::take(&mut self.subscriptions);
             let subscription_updates_waiting_to_be_acked =
                 std::mem::take(&mut self.subscription_updates_waiting_to_be_acked);
@@ -473,7 +476,7 @@ impl State {
 
     pub(super) fn unsubscribe(
         &mut self,
-        unsubscribe_from: String,
+        unsubscribe_from: crate::proto::ByteStr,
     ) -> Result<(), UpdateSubscriptionError> {
         let subscription_update = SubscriptionUpdate::unsubscribe(unsubscribe_from)?;
         self.subscription_updates_waiting_to_be_sent
@@ -506,7 +509,7 @@ impl Default for State {
 #[derive(Clone, Debug)]
 pub(super) enum SubscriptionUpdate {
     Subscribe(crate::proto::SubscribeTo),
-    Unsubscribe(String),
+    Unsubscribe(crate::proto::ByteStr),
 }
 
 impl SubscriptionUpdate {
@@ -535,7 +538,7 @@ impl SubscriptionUpdate {
         Ok(SubscriptionUpdate::Subscribe(subscribe_to))
     }
 
-    pub(super) fn unsubscribe(unsubscribe_from: String) -> Result<Self, UpdateSubscriptionError> {
+    pub(super) fn unsubscribe(unsubscribe_from: crate::proto::ByteStr) -> Result<Self, UpdateSubscriptionError> {
         let mut packet = crate::proto::Unsubscribe {
             packet_identifier: crate::proto::PacketIdentifier::max_value(),
             unsubscribe_from: vec![],
@@ -559,7 +562,7 @@ impl SubscriptionUpdate {
 #[derive(Debug)]
 enum BatchedSubscriptionUpdate {
     Subscribe(Vec<crate::proto::SubscribeTo>),
-    Unsubscribe(Vec<String>),
+    Unsubscribe(Vec<crate::proto::ByteStr>),
 }
 
 #[derive(Debug)]
@@ -634,7 +637,7 @@ impl UpdateSubscriptionHandle {
     /// for this topic filter.
     pub async fn unsubscribe(
         &mut self,
-        unsubscribe_from: String,
+        unsubscribe_from: crate::proto::ByteStr,
     ) -> Result<(), UpdateSubscriptionError> {
         use futures_util::SinkExt;
 
@@ -678,8 +681,8 @@ fn try_append_subscription(
 /// `Err(unsubscribe_from)` and the packet is left unchanged.
 fn try_append_unsubscription(
     packet: &mut crate::proto::Unsubscribe,
-    unsubscribe_from: String,
-) -> Result<(), (String, crate::proto::EncodeError)> {
+    unsubscribe_from: crate::proto::ByteStr,
+) -> Result<(), (crate::proto::ByteStr, crate::proto::EncodeError)> {
     use crate::proto::PacketMeta;
 
     packet.unsubscribe_from.push(unsubscribe_from);
@@ -702,7 +705,7 @@ fn try_append_unsubscription(
 #[derive(Debug)]
 pub enum UpdateSubscriptionError {
     ClientDoesNotExist,
-    EncodePacket(String, crate::proto::EncodeError),
+    EncodePacket(crate::proto::ByteStr, crate::proto::EncodeError),
 }
 
 impl std::fmt::Display for UpdateSubscriptionError {

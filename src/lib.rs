@@ -1,28 +1,24 @@
 /*!
- * This crate contains an implementation of an MQTT client.
+ * This crate contains an implementation of an MQTT client and server.
  */
 
 #![deny(rust_2018_idioms, warnings)]
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(
-    clippy::cognitive_complexity,
     clippy::default_trait_access,
     clippy::large_enum_variant,
+    clippy::let_underscore_drop,
     clippy::let_unit_value,
     clippy::missing_errors_doc,
     clippy::module_name_repetitions,
     clippy::must_use_candidate,
     clippy::pub_enum_variant_names,
-    clippy::similar_names,
-    clippy::single_match_else,
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    clippy::use_self,
-    clippy::let_unit_value,
-    clippy::map_err_ignore
 )]
 
-pub static PROTOCOL_NAME: &str = "MQTT";
+#[allow(clippy::declare_interior_mutable_const)]
+pub const PROTOCOL_NAME: proto::ByteStr = proto::ByteStr::from_static("MQTT");
 
 pub const PROTOCOL_LEVEL: u8 = 0x04;
 

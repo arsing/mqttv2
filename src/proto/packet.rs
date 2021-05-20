@@ -1,8 +1,6 @@
 use std::{convert::TryInto, time::Duration};
 
 use bytes::{Buf, BufMut};
-#[cfg(feature = "serde1")]
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio_util::codec::Decoder;
 
 use crate::proto::{BufMutExt, ByteBuf};
@@ -128,12 +126,12 @@ impl PacketMeta for ConnAck {
 /// Ref: 3.1 CONNECT – Client requests a connection to a Server
 #[derive(Clone, Eq, PartialEq)]
 pub struct Connect {
-    pub username: Option<String>,
-    pub password: Option<String>,
+    pub username: Option<crate::proto::ByteStr>,
+    pub password: Option<crate::proto::ByteStr>,
     pub will: Option<Publication>,
     pub client_id: super::ClientId,
     pub keep_alive: Duration,
-    pub protocol_name: String,
+    pub protocol_name: crate::proto::ByteStr,
     pub protocol_level: u8,
 }
 
@@ -163,6 +161,7 @@ impl PacketMeta for Connect {
         let protocol_name = super::Utf8StringDecoder::default()
             .decode(&mut src)?
             .ok_or(super::DecodeError::IncompletePacket)?;
+        #[allow(clippy::borrow_interior_mutable_const)]
         if protocol_name != crate::PROTOCOL_NAME {
             return Err(super::DecodeError::UnrecognizedProtocolName(protocol_name));
         }
@@ -305,7 +304,8 @@ impl PacketMeta for Connect {
         );
 
         match client_id {
-            super::ClientId::ServerGenerated => super::encode_utf8_str("", dst)?,
+            #[allow(clippy::borrow_interior_mutable_const)]
+            super::ClientId::ServerGenerated => super::encode_utf8_str(&crate::proto::ByteStr::EMPTY, dst)?,
             super::ClientId::IdWithCleanSession(id)
             | super::ClientId::IdWithExistingSession(id) => super::encode_utf8_str(id, dst)?,
         }
@@ -485,13 +485,10 @@ impl PacketMeta for PubComp {
 
 /// 3.3 PUBLISH – Publish message
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde1", derive(Deserialize, Serialize))]
 pub struct Publish {
     pub packet_identifier_dup_qos: PacketIdentifierDupQoS,
     pub retain: bool,
-    pub topic_name: String,
-    #[cfg_attr(feature = "serde1", serde(serialize_with = "serialize_bytes"))]
-    #[cfg_attr(feature = "serde1", serde(deserialize_with = "deserialize_bytes"))]
+    pub topic_name: crate::proto::ByteStr,
     pub payload: bytes::Bytes,
 }
 
@@ -795,7 +792,7 @@ impl PacketMeta for UnsubAck {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Unsubscribe {
     pub packet_identifier: super::PacketIdentifier,
-    pub unsubscribe_from: Vec<String>,
+    pub unsubscribe_from: Vec<crate::proto::ByteStr>,
 }
 
 impl PacketMeta for Unsubscribe {
@@ -855,7 +852,6 @@ impl PacketMeta for Unsubscribe {
 /// A combination of the packet identifier, dup flag and QoS that only allows valid combinations of these three properties.
 /// Used in [`Packet::Publish`]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde1", derive(Deserialize, Serialize))]
 pub enum PacketIdentifierDupQoS {
     AtMostOnce,
     AtLeastOnce(super::PacketIdentifier, bool),
@@ -865,7 +861,7 @@ pub enum PacketIdentifierDupQoS {
 /// A subscription request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscribeTo {
-    pub topic_filter: String,
+    pub topic_filter: crate::proto::ByteStr,
     pub qos: QoS,
 }
 
@@ -873,7 +869,6 @@ pub struct SubscribeTo {
 ///
 /// Ref: 4.3 Quality of Service levels and protocol flows
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "serde1", derive(Deserialize, Serialize))]
 pub enum QoS {
     AtMostOnce,
     AtLeastOnce,
@@ -916,13 +911,10 @@ impl From<SubAckQos> for u8 {
 /// A message that can be published to the server
 //  but not yet assigned a packet identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "serde1", derive(Deserialize, Serialize))]
 pub struct Publication {
-    pub topic_name: String,
+    pub topic_name: crate::proto::ByteStr,
     pub qos: crate::proto::QoS,
     pub retain: bool,
-    #[cfg_attr(feature = "serde1", serde(serialize_with = "serialize_bytes"))]
-    #[cfg_attr(feature = "serde1", serde(deserialize_with = "deserialize_bytes"))]
     pub payload: bytes::Bytes,
 }
 
@@ -1090,20 +1082,4 @@ where
     packet.encode(dst)?;
 
     Ok(())
-}
-
-#[cfg(feature = "serde1")]
-fn serialize_bytes<S>(bytes: &bytes::Bytes, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_bytes(bytes)
-}
-
-#[cfg(feature = "serde1")]
-fn deserialize_bytes<'de, D>(deserializer: D) -> Result<bytes::Bytes, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Vec::<u8>::deserialize(deserializer).map(bytes::Bytes::from)
 }

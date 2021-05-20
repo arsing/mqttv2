@@ -656,11 +656,11 @@ fn should_reject_invalid_subscriptions() {
     let too_large_topic_filter = "a".repeat(usize::from(u16::max_value()) + 1);
 
     match client.subscribe(mqtt3::proto::SubscribeTo { topic_filter: too_large_topic_filter.clone(), qos: mqtt3::proto::QoS::AtMostOnce }) {
-		Err(mqtt3::UpdateSubscriptionError::EncodePacket(_, mqtt3::proto::EncodeError::StringTooLarge(_))) => (),
-		result => panic!("expected client.subscribe() to fail with EncodePacket(StringTooLarge) but it returned {:?}", result),
-	}
+        Err(mqtt3::UpdateSubscriptionError::EncodePacket(_, mqtt3::proto::EncodeError::StringTooLarge(_))) => (),
+        result => panic!("expected client.subscribe() to fail with EncodePacket(StringTooLarge) but it returned {:?}", result),
+    }
     match client.unsubscribe(too_large_topic_filter) {
-		Err(mqtt3::UpdateSubscriptionError::EncodePacket(_, mqtt3::proto::EncodeError::StringTooLarge(_))) => (),
-		result => panic!("expected client.unsubscribe() to fail with EncodePacket(StringTooLarge) but it returned {:?}", result),
-	}
+        Err(mqtt3::UpdateSubscriptionError::EncodePacket(_, mqtt3::proto::EncodeError::StringTooLarge(_))) => (),
+        result => panic!("expected client.unsubscribe() to fail with EncodePacket(StringTooLarge) but it returned {:?}", result),
+    }
 }

@@ -54,8 +54,8 @@ where
     ///
     ///     The keep-alive time advertised to the server. The client will ping the server at half this interval.
     pub fn new(
-        client_id: Option<String>,
-        username: Option<String>,
+        client_id: Option<crate::proto::ByteStr>,
+        username: Option<crate::proto::ByteStr>,
         will: Option<crate::proto::Publication>,
         io_source: IoS,
         max_reconnect_back_off: std::time::Duration,
@@ -66,64 +66,6 @@ where
             None => crate::proto::ClientId::ServerGenerated,
         };
 
-        Self::create(
-            client_id,
-            username,
-            will,
-            io_source,
-            max_reconnect_back_off,
-            keep_alive,
-        )
-    }
-
-    /// Create a new client with the provided session state.
-    ///
-    /// * `client_id`
-    ///
-    ///     This ID will be used to resume an existing session with the server. On subsequent re-connects, the ID
-    ///     and the session will be re-used.
-    ///
-    /// * `username`
-    ///
-    ///     Optional username credential for the server. Note that password is provided via `io_source`.
-    ///
-    /// * `io_source`
-    ///
-    ///     The MQTT protocol is layered onto the I/O object returned by this source.
-    ///
-    /// * `max_reconnect_back_off`
-    ///
-    ///     Every connection failure will double the back-off period, to a maximum of this value.
-    ///
-    /// * `keep_alive`
-    ///
-    ///     The keep-alive time advertised to the server. The client will ping the server at half this interval.
-    pub fn from_state(
-        client_id: String,
-        username: Option<String>,
-        will: Option<crate::proto::Publication>,
-        io_source: IoS,
-        max_reconnect_back_off: std::time::Duration,
-        keep_alive: std::time::Duration,
-    ) -> Self {
-        Self::create(
-            crate::proto::ClientId::IdWithExistingSession(client_id),
-            username,
-            will,
-            io_source,
-            max_reconnect_back_off,
-            keep_alive,
-        )
-    }
-
-    fn create(
-        client_id: crate::proto::ClientId,
-        username: Option<String>,
-        will: Option<crate::proto::Publication>,
-        io_source: IoS,
-        max_reconnect_back_off: std::time::Duration,
-        keep_alive: std::time::Duration,
-    ) -> Self {
         let (shutdown_send, shutdown_recv) = futures_channel::mpsc::channel(0);
 
         // TODO: username / password / will can be too large and prevent a CONNECT packet from being encoded.
@@ -191,7 +133,7 @@ where
     }
 
     /// Unsubscribes from the given topic
-    pub fn unsubscribe(&mut self, unsubscribe_from: String) -> Result<(), UpdateSubscriptionError> {
+    pub fn unsubscribe(&mut self, unsubscribe_from: crate::proto::ByteStr) -> Result<(), UpdateSubscriptionError> {
         match &mut self.0 {
             ClientState::Up { subscriptions, .. } => subscriptions.unsubscribe(unsubscribe_from),
             ClientState::ShuttingDown { .. } | ClientState::ShutDown { .. } => {
@@ -271,7 +213,7 @@ where
                         reset_session,
                     } = match connect.poll(
                         cx,
-                        username.as_ref().map(AsRef::as_ref),
+                        username.as_ref(),
                         will.as_ref(),
                         client_id,
                         *keep_alive,
@@ -363,7 +305,7 @@ where
                 } => {
                     let connect::Connected { mut framed, .. } = match connect.poll(
                         cx,
-                        username.as_ref().map(AsRef::as_ref),
+                        username.as_ref(),
                         will.as_ref(),
                         client_id,
                         *keep_alive,
@@ -482,7 +424,7 @@ pub trait IoSource {
     type Error;
 
     /// The connection future. Contains the I/O object and optional password.
-    type Future: Future<Output = Result<(Self::Io, Option<String>), Self::Error>>;
+    type Future: Future<Output = Result<(Self::Io, Option<crate::proto::ByteStr>), Self::Error>>;
 
     /// Attempts the connection and returns a [`Future`] that resolves when the connection succeeds
     fn connect(&mut self) -> Self::Future;
@@ -491,7 +433,7 @@ pub trait IoSource {
 impl<F, A, I, E> IoSource for F
 where
     F: FnMut() -> A,
-    A: Future<Output = Result<(I, Option<String>), E>>,
+    A: Future<Output = Result<(I, Option<crate::proto::ByteStr>), E>>,
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite,
 {
     type Io = I;
@@ -525,14 +467,14 @@ pub enum Event {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionUpdateEvent {
     Subscribe(crate::proto::SubscribeTo),
-    Unsubscribe(String),
+    Unsubscribe(crate::proto::ByteStr),
     RejectedByServer(crate::proto::SubscribeTo),
 }
 
 /// A message that was received from the server
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReceivedPublication {
-    pub topic_name: String,
+    pub topic_name: crate::proto::ByteStr,
     pub dup: bool,
     pub qos: crate::proto::QoS,
     pub retain: bool,
@@ -564,7 +506,7 @@ where
 {
     Up {
         client_id: crate::proto::ClientId,
-        username: Option<String>,
+        username: Option<crate::proto::ByteStr>,
         will: Option<crate::proto::Publication>,
         keep_alive: std::time::Duration,
 
@@ -584,7 +526,7 @@ where
 
     ShuttingDown {
         client_id: crate::proto::ClientId,
-        username: Option<String>,
+        username: Option<crate::proto::ByteStr>,
         will: Option<crate::proto::Publication>,
         keep_alive: std::time::Duration,
 
@@ -779,7 +721,7 @@ pub enum Error {
     PacketIdentifiersExhausted,
     ServerClosedConnection,
     SubAckDoesNotContainEnoughQoS(crate::proto::PacketIdentifier, usize, usize),
-    SubscriptionDowngraded(String, crate::proto::QoS, crate::proto::QoS),
+    SubscriptionDowngraded(crate::proto::ByteStr, crate::proto::QoS, crate::proto::QoS),
     UnexpectedSubAck(crate::proto::PacketIdentifier, UnexpectedSubUnsubAckReason),
     UnexpectedUnsubAck(crate::proto::PacketIdentifier, UnexpectedSubUnsubAckReason),
 }
@@ -827,37 +769,37 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-			Error::DecodePacket(err) =>
-				write!(f, "could not decode packet: {}", err),
+            Error::DecodePacket(err) =>
+                write!(f, "could not decode packet: {}", err),
 
-			Error::DuplicateExactlyOncePublishPacketNotMarkedDuplicate(packet_identifier) =>
-				write!(
-					f,
-					"server sent a new ExactlyOnce PUBLISH packet {} with the same packet identifier as another unacknowledged ExactlyOnce PUBLISH packet",
-					packet_identifier,
-				),
+            Error::DuplicateExactlyOncePublishPacketNotMarkedDuplicate(packet_identifier) =>
+                write!(
+                    f,
+                    "server sent a new ExactlyOnce PUBLISH packet {} with the same packet identifier as another unacknowledged ExactlyOnce PUBLISH packet",
+                    packet_identifier,
+                ),
 
-			Error::EncodePacket(err) =>
-				write!(f, "could not encode packet: {}", err),
+            Error::EncodePacket(err) =>
+                write!(f, "could not encode packet: {}", err),
 
-			Error::PacketIdentifiersExhausted =>
-				write!(f, "all packet identifiers exhausted"),
+            Error::PacketIdentifiersExhausted =>
+                write!(f, "all packet identifiers exhausted"),
 
-			Error::ServerClosedConnection =>
-				write!(f, "connection closed by server"),
+            Error::ServerClosedConnection =>
+                write!(f, "connection closed by server"),
 
-			Error::SubAckDoesNotContainEnoughQoS(packet_identifier, expected, actual) =>
-				write!(f, "Expected SUBACK {} to contain {} QoS's but it actually contained {}", packet_identifier, expected, actual),
+            Error::SubAckDoesNotContainEnoughQoS(packet_identifier, expected, actual) =>
+                write!(f, "Expected SUBACK {} to contain {} QoS's but it actually contained {}", packet_identifier, expected, actual),
 
-			Error::SubscriptionDowngraded(topic_name, expected, actual) =>
-				write!(f, "Server downgraded subscription for topic filter {:?} with QoS {:?} to {:?}", topic_name, expected, actual),
+            Error::SubscriptionDowngraded(topic_name, expected, actual) =>
+                write!(f, "Server downgraded subscription for topic filter {:?} with QoS {:?} to {:?}", topic_name, expected, actual),
 
-			Error::UnexpectedSubAck(packet_identifier, reason) =>
-				write!(f, "received SUBACK {} but {}", packet_identifier, reason),
+            Error::UnexpectedSubAck(packet_identifier, reason) =>
+                write!(f, "received SUBACK {} but {}", packet_identifier, reason),
 
-			Error::UnexpectedUnsubAck(packet_identifier, reason) =>
-				write!(f, "received UNSUBACK {} but {}", packet_identifier, reason),
-		}
+            Error::UnexpectedUnsubAck(packet_identifier, reason) =>
+                write!(f, "received UNSUBACK {} but {}", packet_identifier, reason),
+        }
     }
 }
 

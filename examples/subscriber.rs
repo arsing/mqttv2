@@ -15,19 +15,19 @@ struct Options {
         help = "Client ID used to identify this application to the server. If not given, a server-generated ID will be used.",
         long = "client-id"
     )]
-    client_id: Option<String>,
+    client_id: Option<mqtt3::proto::ByteStr>,
 
     #[structopt(
         help = "Username used to authenticate with the server, if any.",
         long = "username"
     )]
-    username: Option<String>,
+    username: Option<mqtt3::proto::ByteStr>,
 
     #[structopt(
         help = "Password used to authenticate with the server, if any.",
         long = "password"
     )]
-    password: Option<String>,
+    password: Option<mqtt3::proto::ByteStr>,
 
     #[structopt(
 		help = "Maximum back-off time between reconnections to the server, in seconds.",
@@ -46,7 +46,7 @@ struct Options {
     keep_alive: std::time::Duration,
 
     #[structopt(help = "The topic filter to subscribe to.", long = "topic-filter")]
-    topic_filter: String,
+    topic_filter: mqtt3::proto::ByteStr,
 
     #[structopt(help = "The QoS with which to subscribe to the topic.", long = "qos", parse(try_from_str = common::qos_from_str))]
     qos: mqtt3::proto::QoS,
