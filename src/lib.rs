@@ -22,13 +22,26 @@ pub const PROTOCOL_NAME: proto::ByteStr = proto::ByteStr::from_static("MQTT");
 
 pub const PROTOCOL_LEVEL: u8 = 0x04;
 
+#[cfg(feature = "client")]
 mod client;
+#[cfg(feature = "client")]
 pub use client::{
     Client, ConnectionError, Error, Event, IoSource, PublishError, PublishHandle,
     ReceivedPublication, ShutdownError, ShutdownHandle, SubscriptionUpdateEvent,
     UpdateSubscriptionError, UpdateSubscriptionHandle,
 };
 
+#[cfg(feature = "server")]
+mod server;
+#[cfg(feature = "server")]
+pub use server::{
+    Server,
+};
+
+#[cfg(any(
+    feature = "client",
+    feature = "server",
+))]
 mod logging_framed;
 
 pub mod proto;

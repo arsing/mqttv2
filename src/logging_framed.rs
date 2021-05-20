@@ -1,11 +1,12 @@
 use crate::proto::Packet;
 
+#[pin_project::pin_project]
 #[derive(Debug)]
 pub(crate) struct LoggingFramed<T>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite,
 {
-    inner: tokio_util::codec::Framed<T, crate::proto::PacketCodec>,
+    #[pin] inner: tokio_util::codec::Framed<T, crate::proto::PacketCodec>,
 }
 
 impl<T> LoggingFramed<T>
@@ -21,40 +22,40 @@ where
 
 impl<T> futures_sink::Sink<Packet> for LoggingFramed<T>
 where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite,
 {
     type Error = <crate::proto::PacketCodec as tokio_util::codec::Encoder<Packet>>::Error;
 
     fn poll_ready(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::pin::Pin::new(&mut self.inner).poll_ready(cx)
+        self.project().inner.poll_ready(cx)
     }
 
-    fn start_send(mut self: std::pin::Pin<&mut Self>, item: Packet) -> Result<(), Self::Error> {
+    fn start_send(self: std::pin::Pin<&mut Self>, item: Packet) -> Result<(), Self::Error> {
         log::trace!(">>> {:?}", item);
-        std::pin::Pin::new(&mut self.inner).start_send(item)
+        self.project().inner.start_send(item)
     }
 
     fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        self.project().inner.poll_flush(cx)
     }
 
     fn poll_close(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::pin::Pin::new(&mut self.inner).poll_close(cx)
+        self.project().inner.poll_close(cx)
     }
 }
 
 impl<T> futures_core::Stream for LoggingFramed<T>
 where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite,
 {
     type Item = Result<
         <crate::proto::PacketCodec as tokio_util::codec::Decoder>::Item,
@@ -62,10 +63,10 @@ where
     >;
 
     fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let result = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+        let result = self.project().inner.poll_next(cx);
         if let std::task::Poll::Ready(Some(Ok(item))) = &result {
             log::trace!("<<< {:?}", item);
         }

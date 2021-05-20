@@ -1,6 +1,6 @@
 // Example:
 //
-//     cargo run --example publisher -- --server 127.0.0.1:1883 --client-id 'example-publisher' --publish-frequency 1000 --topic foo --qos 1 --payload 'hello, world'
+//     cargo run --features client --example publisher -- --server 127.0.0.1:1883 --client-id 'example-publisher' --publish-frequency 1000 --topic foo --qos 1 --payload 'hello, world'
 
 use futures_util::StreamExt;
 
@@ -63,7 +63,7 @@ struct Options {
     payload: String,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::new().filter_or(
         "MQTT3_LOG",

@@ -18,6 +18,7 @@ pub use packet::{
     SubscribeTo, UnsubAck, Unsubscribe,
 };
 
+#[cfg(feature = "client")]
 pub(crate) use packet::PacketMeta;
 
 /// The client ID

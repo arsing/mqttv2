@@ -1,6 +1,6 @@
 // Example:
 //
-//     cargo run --example subscriber -- --server 127.0.0.1:1883 --client-id 'example-subscriber' --topic-filter foo --qos 1
+//     cargo run --features client --example subscriber -- --server 127.0.0.1:1883 --client-id 'example-subscriber' --topic-filter foo --qos 1
 
 use futures_util::StreamExt;
 
@@ -52,7 +52,7 @@ struct Options {
     qos: mqtt3::proto::QoS,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::new().filter_or(
         "MQTT3_LOG",
