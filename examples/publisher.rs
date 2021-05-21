@@ -63,11 +63,11 @@ struct Options {
     payload: String,
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::new().filter_or(
         "MQTT3_LOG",
-        "mqtt3=debug,mqtt3::logging=trace,publisher=info",
+        "mqtt3=debug,mqtt3::io=trace,publisher=info",
     ))
     .init();
 
@@ -91,8 +91,8 @@ async fn main() {
         move || {
             let password = password.clone();
             Box::pin(async move {
-                let io = tokio::net::TcpStream::connect(&server).await;
-                io.map(|io| (io, password))
+                let (stream, sink) = common::tokio::connect(server).await?;
+                Ok::<_, std::io::Error>((stream, sink, password))
             })
         },
         max_reconnect_back_off,
@@ -116,9 +116,17 @@ async fn main() {
         .publish_handle()
         .expect("couldn't get publish handle");
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(publish_frequency);
+        let mut interval =
+            if publish_frequency.as_nanos() == 0 {
+                None
+            }
+            else {
+                Some(tokio::time::interval(publish_frequency))
+            };
         loop {
-            interval.tick().await;
+            if let Some(interval) = interval.as_mut() {
+                interval.tick().await;
+            }
 
             let topic = topic.clone();
             log::info!("Publishing to {} ...", topic);
@@ -126,7 +134,7 @@ async fn main() {
             let mut publish_handle = publish_handle.clone();
             let payload = payload.clone();
 
-            tokio::spawn(async move {
+            let f = async move {
                 let result = publish_handle
                     .publish(mqtt3::proto::Publication {
                         topic_name: topic.clone(),
@@ -138,7 +146,13 @@ async fn main() {
                 let () = result.expect("couldn't publish");
                 log::info!("Published to {}", topic);
                 Ok::<_, ()>(())
-            });
+            };
+            if interval.is_some() {
+                tokio::spawn(f);
+            }
+            else {
+                let _ = f.await;
+            }
         }
     });
 

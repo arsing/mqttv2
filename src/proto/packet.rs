@@ -1,7 +1,6 @@
 use std::{convert::TryInto, time::Duration};
 
-use bytes::{Buf, BufMut};
-use tokio_util::codec::Decoder;
+use bytes::Buf;
 
 use crate::proto::{BufMutExt, ByteBuf};
 
@@ -52,7 +51,7 @@ pub enum Packet {
 }
 
 /// Metadata about a [`Packet`]
-pub(crate) trait PacketMeta: Sized {
+pub trait PacketMeta: Clone + Sized {
     /// The packet type for this kind of packet
     const PACKET_TYPE: u8;
 
@@ -62,7 +61,7 @@ pub(crate) trait PacketMeta: Sized {
     /// Encodes the variable header and payload corresponding to this packet into the given buffer.
     /// The buffer is expected to already have the packet type and body length encoded into it,
     /// and to have reserved enough space to put the bytes of this packet directly into the buffer.
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf;
 }
@@ -103,7 +102,7 @@ impl PacketMeta for ConnAck {
         })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -111,13 +110,13 @@ impl PacketMeta for ConnAck {
             session_present,
             return_code,
         } = self;
-        if *session_present {
+        if session_present {
             dst.put_u8_bytes(0x01);
         } else {
             dst.put_u8_bytes(0x00);
         }
 
-        dst.put_u8_bytes((*return_code).into());
+        dst.put_u8_bytes(return_code.into());
 
         Ok(())
     }
@@ -158,8 +157,8 @@ impl PacketMeta for Connect {
             });
         }
 
-        let protocol_name = super::Utf8StringDecoder::default()
-            .decode(&mut src)?
+        let protocol_name =
+            super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
             .ok_or(super::DecodeError::IncompletePacket)?;
         #[allow(clippy::borrow_interior_mutable_const)]
         if protocol_name != crate::PROTOCOL_NAME {
@@ -175,8 +174,8 @@ impl PacketMeta for Connect {
 
         let keep_alive = Duration::from_secs(u64::from(src.try_get_u16_be()?));
 
-        let client_id = super::Utf8StringDecoder::default()
-            .decode(&mut src)?
+        let client_id =
+            super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
             .ok_or(super::DecodeError::IncompletePacket)?;
         let client_id = if client_id.is_empty() {
             if connect_flags & 0x02 == 0 {
@@ -192,8 +191,8 @@ impl PacketMeta for Connect {
         let will = if connect_flags & 0x04 == 0 {
             None
         } else {
-            let topic_name = super::Utf8StringDecoder::default()
-                .decode(&mut src)?
+            let topic_name =
+                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
                 .ok_or(super::DecodeError::IncompletePacket)?;
 
             let qos = match connect_flags & 0x18 {
@@ -223,8 +222,7 @@ impl PacketMeta for Connect {
             None
         } else {
             Some(
-                super::Utf8StringDecoder::default()
-                    .decode(&mut src)?
+                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
                     .ok_or(super::DecodeError::IncompletePacket)?,
             )
         };
@@ -233,8 +231,7 @@ impl PacketMeta for Connect {
             None
         } else {
             Some(
-                super::Utf8StringDecoder::default()
-                    .decode(&mut src)?
+                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
                     .ok_or(super::DecodeError::IncompletePacket)?,
             )
         };
@@ -250,7 +247,7 @@ impl PacketMeta for Connect {
         })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -266,7 +263,7 @@ impl PacketMeta for Connect {
 
         super::encode_utf8_str(protocol_name, dst)?;
 
-        dst.put_u8_bytes(*protocol_level);
+        dst.put_u8_bytes(protocol_level);
 
         {
             let mut connect_flags = 0x00_u8;
@@ -300,18 +297,18 @@ impl PacketMeta for Connect {
             keep_alive
                 .as_secs()
                 .try_into()
-                .map_err(|_| super::EncodeError::KeepAliveTooHigh(*keep_alive))?,
+                .map_err(|_| super::EncodeError::KeepAliveTooHigh(keep_alive))?,
         );
 
         match client_id {
             #[allow(clippy::borrow_interior_mutable_const)]
-            super::ClientId::ServerGenerated => super::encode_utf8_str(&crate::proto::ByteStr::EMPTY, dst)?,
+            super::ClientId::ServerGenerated => super::encode_utf8_str(crate::proto::ByteStr::EMPTY, dst)?,
             super::ClientId::IdWithCleanSession(id)
             | super::ClientId::IdWithExistingSession(id) => super::encode_utf8_str(id, dst)?,
         }
 
         if let Some(will) = will {
-            super::encode_utf8_str(&will.topic_name, dst)?;
+            super::encode_utf8_str(will.topic_name, dst)?;
 
             let will_len = will.payload.len();
             dst.put_u16_bytes(
@@ -320,7 +317,7 @@ impl PacketMeta for Connect {
                     .map_err(|_| super::EncodeError::WillTooLarge(will_len))?,
             );
 
-            dst.put_slice_bytes(&will.payload);
+            dst.put_bytes(will.payload);
         }
 
         if let Some(username) = username {
@@ -354,7 +351,7 @@ impl PacketMeta for Disconnect {
         Ok(Disconnect)
     }
 
-    fn encode<B>(&self, _: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, _: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -381,7 +378,7 @@ impl PacketMeta for PingReq {
         Ok(PingReq)
     }
 
-    fn encode<B>(&self, _: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, _: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -408,7 +405,7 @@ impl PacketMeta for PingResp {
         Ok(PingResp)
     }
 
-    fn encode<B>(&self, _: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, _: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -439,12 +436,12 @@ impl PacketMeta for PubAck {
         Ok(PubAck { packet_identifier })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
         let PubAck { packet_identifier } = self;
-        dst.put_packet_identifier_bytes(*packet_identifier);
+        dst.put_packet_identifier_bytes(packet_identifier);
         Ok(())
     }
 }
@@ -473,12 +470,12 @@ impl PacketMeta for PubComp {
         Ok(PubComp { packet_identifier })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
         let PubComp { packet_identifier } = self;
-        dst.put_packet_identifier_bytes(*packet_identifier);
+        dst.put_packet_identifier_bytes(packet_identifier);
         Ok(())
     }
 }
@@ -499,8 +496,8 @@ impl PacketMeta for Publish {
         let dup = (flags & 0x08) != 0;
         let retain = (flags & 0x01) != 0;
 
-        let topic_name = super::Utf8StringDecoder::default()
-            .decode(&mut src)?
+        let topic_name =
+            super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
             .ok_or(super::DecodeError::IncompletePacket)?;
 
         let packet_identifier_dup_qos = match (flags & 0x06) >> 1 {
@@ -531,7 +528,7 @@ impl PacketMeta for Publish {
         })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -549,11 +546,11 @@ impl PacketMeta for Publish {
             PacketIdentifierDupQoS::AtMostOnce => (),
             PacketIdentifierDupQoS::AtLeastOnce(packet_identifier, _)
             | PacketIdentifierDupQoS::ExactlyOnce(packet_identifier, _) => {
-                dst.put_packet_identifier_bytes(*packet_identifier)
+                dst.put_packet_identifier_bytes(packet_identifier)
             }
         }
 
-        dst.put_slice_bytes(&payload);
+        dst.put_bytes(payload);
 
         Ok(())
     }
@@ -583,12 +580,12 @@ impl PacketMeta for PubRec {
         Ok(PubRec { packet_identifier })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
         let PubRec { packet_identifier } = self;
-        dst.put_packet_identifier_bytes(*packet_identifier);
+        dst.put_packet_identifier_bytes(packet_identifier);
         Ok(())
     }
 }
@@ -617,12 +614,12 @@ impl PacketMeta for PubRel {
         Ok(PubRel { packet_identifier })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
         let PubRel { packet_identifier } = self;
-        dst.put_packet_identifier_bytes(*packet_identifier);
+        dst.put_packet_identifier_bytes(packet_identifier);
         Ok(())
     }
 }
@@ -670,7 +667,7 @@ impl PacketMeta for SubAck {
         })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -679,9 +676,9 @@ impl PacketMeta for SubAck {
             qos,
         } = self;
 
-        dst.put_packet_identifier_bytes(*packet_identifier);
+        dst.put_packet_identifier_bytes(packet_identifier);
 
-        for &qos in qos {
+        for qos in qos {
             dst.put_u8_bytes(qos.into());
         }
 
@@ -713,8 +710,8 @@ impl PacketMeta for Subscribe {
         let mut subscribe_to = vec![];
 
         while !src.is_empty() {
-            let topic_filter = super::Utf8StringDecoder::default()
-                .decode(&mut src)?
+            let topic_filter =
+                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
                 .ok_or(super::DecodeError::IncompletePacket)?;
             let qos = match src.try_get_u8()? {
                 0x00 => QoS::AtMostOnce,
@@ -735,7 +732,7 @@ impl PacketMeta for Subscribe {
         })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -744,11 +741,11 @@ impl PacketMeta for Subscribe {
             subscribe_to,
         } = self;
 
-        dst.put_packet_identifier_bytes(*packet_identifier);
+        dst.put_packet_identifier_bytes(packet_identifier);
 
         for SubscribeTo { topic_filter, qos } in subscribe_to {
             super::encode_utf8_str(topic_filter, dst)?;
-            dst.put_u8_bytes((*qos).into());
+            dst.put_u8_bytes(qos.into());
         }
 
         Ok(())
@@ -778,12 +775,12 @@ impl PacketMeta for UnsubAck {
         Ok(UnsubAck { packet_identifier })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
         let UnsubAck { packet_identifier } = self;
-        dst.put_packet_identifier_bytes(*packet_identifier);
+        dst.put_packet_identifier_bytes(packet_identifier);
         Ok(())
     }
 }
@@ -813,8 +810,7 @@ impl PacketMeta for Unsubscribe {
 
         while !src.is_empty() {
             unsubscribe_from.push(
-                super::Utf8StringDecoder::default()
-                    .decode(&mut src)?
+                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
                     .ok_or(super::DecodeError::IncompletePacket)?,
             );
         }
@@ -829,7 +825,7 @@ impl PacketMeta for Unsubscribe {
         })
     }
 
-    fn encode<B>(&self, dst: &mut B) -> Result<(), super::EncodeError>
+    fn encode<B>(self, dst: &mut B) -> Result<(), super::EncodeError>
     where
         B: ByteBuf,
     {
@@ -838,7 +834,7 @@ impl PacketMeta for Unsubscribe {
             unsubscribe_from,
         } = self;
 
-        dst.put_packet_identifier_bytes(*packet_identifier);
+        dst.put_packet_identifier_bytes(packet_identifier);
 
         for unsubscribe_from in unsubscribe_from {
             super::encode_utf8_str(unsubscribe_from, dst)?;
@@ -918,11 +914,11 @@ pub struct Publication {
     pub payload: bytes::Bytes,
 }
 
-/// A tokio codec that encodes and decodes MQTT packets.
+/// A decoder for MQTT packets.
 ///
 /// Ref: 2 MQTT Control Packet format
 #[derive(Debug, Default)]
-pub struct PacketCodec {
+pub struct PacketDecoder {
     decoder_state: PacketDecoderState,
 }
 
@@ -945,141 +941,125 @@ impl Default for PacketDecoderState {
     }
 }
 
-impl tokio_util::codec::Decoder for PacketCodec {
-    type Item = Packet;
-    type Error = super::DecodeError;
+pub fn decode(decoder: &mut PacketDecoder, src: &mut bytes::BytesMut) -> Result<Option<Packet>, super::DecodeError> {
+    let (first_byte, src) = loop {
+        match &mut decoder.decoder_state {
+            PacketDecoderState::Empty => {
+                let first_byte = match src.try_get_u8() {
+                    Ok(first_byte) => first_byte,
+                    Err(_) => return Ok(None),
+                };
+                decoder.decoder_state = PacketDecoderState::HaveFirstByte {
+                    first_byte,
+                    remaining_length: Default::default(),
+                };
+            }
 
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        let (first_byte, src) = loop {
-            match &mut self.decoder_state {
-                PacketDecoderState::Empty => {
-                    let first_byte = match src.try_get_u8() {
-                        Ok(first_byte) => first_byte,
-                        Err(_) => return Ok(None),
-                    };
-                    self.decoder_state = PacketDecoderState::HaveFirstByte {
-                        first_byte,
-                        remaining_length: Default::default(),
-                    };
+            PacketDecoderState::HaveFirstByte {
+                first_byte,
+                remaining_length,
+            } => match super::decode_remaining_length(remaining_length, src)? {
+                Some(remaining_length) => {
+                    decoder.decoder_state = PacketDecoderState::HaveFixedHeader {
+                        first_byte: *first_byte,
+                        remaining_length,
+                    }
+                }
+                None => return Ok(None),
+            },
+
+            PacketDecoderState::HaveFixedHeader {
+                first_byte,
+                remaining_length,
+            } => {
+                if src.len() < *remaining_length {
+                    return Ok(None);
                 }
 
-                PacketDecoderState::HaveFirstByte {
-                    first_byte,
-                    remaining_length,
-                } => match remaining_length.decode(src)? {
-                    Some(remaining_length) => {
-                        self.decoder_state = PacketDecoderState::HaveFixedHeader {
-                            first_byte: *first_byte,
-                            remaining_length,
-                        }
-                    }
-                    None => return Ok(None),
-                },
-
-                PacketDecoderState::HaveFixedHeader {
-                    first_byte,
-                    remaining_length,
-                } => {
-                    if src.len() < *remaining_length {
-                        return Ok(None);
-                    }
-
-                    let first_byte = *first_byte;
-                    let src = src.split_to(*remaining_length);
-                    self.decoder_state = PacketDecoderState::Empty;
-                    break (first_byte, src);
-                }
+                let first_byte = *first_byte;
+                let src = src.split_to(*remaining_length);
+                decoder.decoder_state = PacketDecoderState::Empty;
+                break (first_byte, src);
             }
-        };
-
-        let packet_type = first_byte & 0xF0;
-        let flags = first_byte & 0x0F;
-        match packet_type {
-            ConnAck::PACKET_TYPE => Ok(Some(Packet::ConnAck(ConnAck::decode(flags, src)?))),
-            Connect::PACKET_TYPE => Ok(Some(Packet::Connect(Connect::decode(flags, src)?))),
-            Disconnect::PACKET_TYPE => {
-                Ok(Some(Packet::Disconnect(Disconnect::decode(flags, src)?)))
-            }
-            PingReq::PACKET_TYPE => Ok(Some(Packet::PingReq(PingReq::decode(flags, src)?))),
-            PingResp::PACKET_TYPE => Ok(Some(Packet::PingResp(PingResp::decode(flags, src)?))),
-            PubAck::PACKET_TYPE => Ok(Some(Packet::PubAck(PubAck::decode(flags, src)?))),
-            PubComp::PACKET_TYPE => Ok(Some(Packet::PubComp(PubComp::decode(flags, src)?))),
-            Publish::PACKET_TYPE => Ok(Some(Packet::Publish(Publish::decode(flags, src)?))),
-            PubRec::PACKET_TYPE => Ok(Some(Packet::PubRec(PubRec::decode(flags, src)?))),
-            PubRel::PACKET_TYPE => Ok(Some(Packet::PubRel(PubRel::decode(flags, src)?))),
-            SubAck::PACKET_TYPE => Ok(Some(Packet::SubAck(SubAck::decode(flags, src)?))),
-            Subscribe::PACKET_TYPE => Ok(Some(Packet::Subscribe(Subscribe::decode(flags, src)?))),
-            UnsubAck::PACKET_TYPE => Ok(Some(Packet::UnsubAck(UnsubAck::decode(flags, src)?))),
-            Unsubscribe::PACKET_TYPE => {
-                Ok(Some(Packet::Unsubscribe(Unsubscribe::decode(flags, src)?)))
-            }
-            packet_type => Err(super::DecodeError::UnrecognizedPacket {
-                packet_type,
-                flags,
-                remaining_length: src.len(),
-            }),
         }
+    };
+
+    let packet_type = first_byte & 0xF0;
+    let flags = first_byte & 0x0F;
+    match packet_type {
+        ConnAck::PACKET_TYPE => Ok(Some(Packet::ConnAck(ConnAck::decode(flags, src)?))),
+        Connect::PACKET_TYPE => Ok(Some(Packet::Connect(Connect::decode(flags, src)?))),
+        Disconnect::PACKET_TYPE => {
+            Ok(Some(Packet::Disconnect(Disconnect::decode(flags, src)?)))
+        }
+        PingReq::PACKET_TYPE => Ok(Some(Packet::PingReq(PingReq::decode(flags, src)?))),
+        PingResp::PACKET_TYPE => Ok(Some(Packet::PingResp(PingResp::decode(flags, src)?))),
+        PubAck::PACKET_TYPE => Ok(Some(Packet::PubAck(PubAck::decode(flags, src)?))),
+        PubComp::PACKET_TYPE => Ok(Some(Packet::PubComp(PubComp::decode(flags, src)?))),
+        Publish::PACKET_TYPE => Ok(Some(Packet::Publish(Publish::decode(flags, src)?))),
+        PubRec::PACKET_TYPE => Ok(Some(Packet::PubRec(PubRec::decode(flags, src)?))),
+        PubRel::PACKET_TYPE => Ok(Some(Packet::PubRel(PubRel::decode(flags, src)?))),
+        SubAck::PACKET_TYPE => Ok(Some(Packet::SubAck(SubAck::decode(flags, src)?))),
+        Subscribe::PACKET_TYPE => Ok(Some(Packet::Subscribe(Subscribe::decode(flags, src)?))),
+        UnsubAck::PACKET_TYPE => Ok(Some(Packet::UnsubAck(UnsubAck::decode(flags, src)?))),
+        Unsubscribe::PACKET_TYPE => {
+            Ok(Some(Packet::Unsubscribe(Unsubscribe::decode(flags, src)?)))
+        }
+        packet_type => Err(super::DecodeError::UnrecognizedPacket {
+            packet_type,
+            flags,
+            remaining_length: src.len(),
+        }),
     }
 }
 
-impl tokio_util::codec::Encoder<Packet> for PacketCodec {
-    type Error = super::EncodeError;
+pub fn encode<B>(item: Packet, dst: &mut B) -> Result<(), super::EncodeError> where B: ByteBuf {
+    fn encode_inner<P, B>(
+        packet: P,
+        flags: u8,
+        dst: &mut B,
+    ) -> Result<(), super::EncodeError>
+    where
+        P: PacketMeta,
+        B: ByteBuf,
+    {
+        let mut counter = super::ByteCounter::new();
+        packet.clone().encode(&mut counter)?;
+        let body_len = counter.0;
 
-    fn encode(&mut self, item: Packet, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        dst.reserve(std::mem::size_of::<u8>() + 4 * std::mem::size_of::<u8>());
+        dst.put_u8_bytes(<P as PacketMeta>::PACKET_TYPE | flags);
+        super::encode_remaining_length(body_len, dst)?;
+        packet.encode(dst)?;
 
-        match &item {
-            Packet::ConnAck(packet) => encode_packet(packet, 0, dst),
-            Packet::Connect(packet) => encode_packet(packet, 0, dst),
-            Packet::Disconnect(packet) => encode_packet(packet, 0, dst),
-            Packet::PingReq(packet) => encode_packet(packet, 0, dst),
-            Packet::PingResp(packet) => encode_packet(packet, 0, dst),
-            Packet::PubAck(packet) => encode_packet(packet, 0, dst),
-            Packet::PubComp(packet) => encode_packet(packet, 0, dst),
-            Packet::Publish(packet) => {
-                let mut flags = match packet.packet_identifier_dup_qos {
-                    PacketIdentifierDupQoS::AtMostOnce => 0x00,
-                    PacketIdentifierDupQoS::AtLeastOnce(_, true) => 0x0A,
-                    PacketIdentifierDupQoS::AtLeastOnce(_, false) => 0x02,
-                    PacketIdentifierDupQoS::ExactlyOnce(_, true) => 0x0C,
-                    PacketIdentifierDupQoS::ExactlyOnce(_, false) => 0x04,
-                };
-                if packet.retain {
-                    flags |= 0x01;
-                };
-                encode_packet(packet, flags, dst)
-            }
-            Packet::PubRec(packet) => encode_packet(packet, 0, dst),
-            Packet::PubRel(packet) => encode_packet(packet, 0x02, dst),
-            Packet::SubAck(packet) => encode_packet(packet, 0, dst),
-            Packet::Subscribe(packet) => encode_packet(packet, 0x02, dst),
-            Packet::UnsubAck(packet) => encode_packet(packet, 0, dst),
-            Packet::Unsubscribe(packet) => encode_packet(packet, 0x02, dst),
-        }
+        Ok(())
     }
-}
 
-fn encode_packet<P>(
-    packet: &P,
-    flags: u8,
-    dst: &mut bytes::BytesMut,
-) -> Result<(), super::EncodeError>
-where
-    P: PacketMeta,
-{
-    let mut counter = super::ByteCounter::new();
-    packet.encode(&mut counter)?;
-    let body_len = counter.0;
-
-    dst.reserve(
-        std::mem::size_of::<u8>() + // packet type
-            4 * std::mem::size_of::<u8>() + // remaining length
-            body_len,
-    );
-
-    dst.put_u8(<P as PacketMeta>::PACKET_TYPE | flags);
-    super::encode_remaining_length(body_len, dst)?;
-    packet.encode(dst)?;
-
-    Ok(())
+    match item {
+        Packet::ConnAck(packet) => encode_inner(packet, 0, dst),
+        Packet::Connect(packet) => encode_inner(packet, 0, dst),
+        Packet::Disconnect(packet) => encode_inner(packet, 0, dst),
+        Packet::PingReq(packet) => encode_inner(packet, 0, dst),
+        Packet::PingResp(packet) => encode_inner(packet, 0, dst),
+        Packet::PubAck(packet) => encode_inner(packet, 0, dst),
+        Packet::PubComp(packet) => encode_inner(packet, 0, dst),
+        Packet::Publish(packet) => {
+            let mut flags = match packet.packet_identifier_dup_qos {
+                PacketIdentifierDupQoS::AtMostOnce => 0x00,
+                PacketIdentifierDupQoS::AtLeastOnce(_, true) => 0x0A,
+                PacketIdentifierDupQoS::AtLeastOnce(_, false) => 0x02,
+                PacketIdentifierDupQoS::ExactlyOnce(_, true) => 0x0C,
+                PacketIdentifierDupQoS::ExactlyOnce(_, false) => 0x04,
+            };
+            if packet.retain {
+                flags |= 0x01;
+            };
+            encode_inner(packet, flags, dst)
+        }
+        Packet::PubRec(packet) => encode_inner(packet, 0, dst),
+        Packet::PubRel(packet) => encode_inner(packet, 0x02, dst),
+        Packet::SubAck(packet) => encode_inner(packet, 0, dst),
+        Packet::Subscribe(packet) => encode_inner(packet, 0x02, dst),
+        Packet::UnsubAck(packet) => encode_inner(packet, 0, dst),
+        Packet::Unsubscribe(packet) => encode_inner(packet, 0x02, dst),
+    }
 }

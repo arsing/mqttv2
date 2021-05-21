@@ -433,7 +433,8 @@ impl PublishRequest {
         };
 
         let mut counter = crate::proto::ByteCounter::new();
-        let encode_result = packet
+        let encode_result =
+            packet.clone()
             .encode(&mut counter)
             .and_then(|()| crate::proto::encode_remaining_length(counter.0, &mut counter));
 

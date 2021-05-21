@@ -4,7 +4,7 @@
 
 use std::convert::TryInto;
 
-use bytes::{Buf, BufMut};
+use bytes::Buf;
 
 mod byte_str;
 pub use byte_str::{
@@ -13,9 +13,10 @@ pub use byte_str::{
 
 mod packet;
 pub use packet::{
-    ConnAck, Connect, Disconnect, Packet, PacketCodec, PacketIdentifierDupQoS, PingReq, PingResp,
+    ConnAck, Connect, Disconnect, Packet, PacketDecoder, PacketIdentifierDupQoS, PingReq, PingResp,
     PubAck, PubComp, PubRec, PubRel, Publication, Publish, QoS, SubAck, SubAckQos, Subscribe,
     SubscribeTo, UnsubAck, Unsubscribe,
+    decode, encode,
 };
 
 #[cfg(feature = "client")]
@@ -104,36 +105,31 @@ impl Default for Utf8StringDecoder {
     }
 }
 
-impl tokio_util::codec::Decoder for Utf8StringDecoder {
-    type Item = ByteStr;
-    type Error = DecodeError;
+fn decode_utf8_str(decoder: &mut Utf8StringDecoder, src: &mut bytes::BytesMut) -> Result<Option<ByteStr>, DecodeError> {
+    loop {
+        match decoder {
+            Utf8StringDecoder::Empty => {
+                let len = match src.try_get_u16_be() {
+                    Ok(len) => len as usize,
+                    Err(_) => return Ok(None),
+                };
+                *decoder = Utf8StringDecoder::HaveLength(len);
+            }
 
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        loop {
-            match self {
-                Utf8StringDecoder::Empty => {
-                    let len = match src.try_get_u16_be() {
-                        Ok(len) => len as usize,
-                        Err(_) => return Ok(None),
-                    };
-                    *self = Utf8StringDecoder::HaveLength(len);
+            Utf8StringDecoder::HaveLength(len) => {
+                if src.len() < *len {
+                    return Ok(None);
                 }
 
-                Utf8StringDecoder::HaveLength(len) => {
-                    if src.len() < *len {
-                        return Ok(None);
-                    }
-
-                    let s = src.split_to(*len).freeze().try_into().map_err(DecodeError::StringNotUtf8)?;
-                    *self = Utf8StringDecoder::Empty;
-                    return Ok(Some(s));
-                }
+                let s = src.split_to(*len).freeze().try_into().map_err(DecodeError::StringNotUtf8)?;
+                *decoder = Utf8StringDecoder::Empty;
+                return Ok(Some(s));
             }
         }
     }
 }
 
-fn encode_utf8_str<B>(item: &ByteStr, dst: &mut B) -> Result<(), EncodeError>
+fn encode_utf8_str<B>(item: ByteStr, dst: &mut B) -> Result<(), EncodeError>
 where
     B: ByteBuf,
 {
@@ -143,7 +139,7 @@ where
             .map_err(|_| EncodeError::StringTooLarge(len))?,
     );
 
-    dst.put_slice_bytes(item.as_bytes());
+    dst.put_bytes(item.0);
 
     Ok(())
 }
@@ -168,29 +164,24 @@ impl Default for RemainingLengthDecoder {
     }
 }
 
-impl tokio_util::codec::Decoder for RemainingLengthDecoder {
-    type Item = usize;
-    type Error = DecodeError;
+fn decode_remaining_length(decoder: &mut RemainingLengthDecoder, src: &mut bytes::BytesMut) -> Result<Option<usize>, DecodeError> {
+    loop {
+        let encoded_byte = match src.try_get_u8() {
+            Ok(encoded_byte) => encoded_byte,
+            Err(_) => return Ok(None),
+        };
 
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        loop {
-            let encoded_byte = match src.try_get_u8() {
-                Ok(encoded_byte) => encoded_byte,
-                Err(_) => return Ok(None),
-            };
+        decoder.result |= ((encoded_byte & 0x7F) as usize) << (decoder.num_bytes_read * 7);
+        decoder.num_bytes_read += 1;
 
-            self.result |= ((encoded_byte & 0x7F) as usize) << (self.num_bytes_read * 7);
-            self.num_bytes_read += 1;
+        if encoded_byte & 0x80 == 0 {
+            let result = decoder.result;
+            *decoder = Default::default();
+            return Ok(Some(result));
+        }
 
-            if encoded_byte & 0x80 == 0 {
-                let result = self.result;
-                *self = Default::default();
-                return Ok(Some(result));
-            }
-
-            if self.num_bytes_read == 4 {
-                return Err(DecodeError::RemainingLengthTooHigh);
-            }
+        if decoder.num_bytes_read == 4 {
+            return Err(DecodeError::RemainingLengthTooHigh);
         }
     }
 }
@@ -199,8 +190,6 @@ pub(crate) fn encode_remaining_length<B>(mut item: usize, dst: &mut B) -> Result
 where
     B: ByteBuf,
 {
-    dst.reserve_bytes(4 * std::mem::size_of::<u8>());
-
     let original = item;
     let mut num_bytes_written = 0_usize;
 
@@ -435,9 +424,7 @@ impl From<std::io::Error> for EncodeError {
     }
 }
 
-pub(crate) trait ByteBuf {
-    fn reserve_bytes(&mut self, additional: usize);
-
+pub trait ByteBuf {
     fn put_u8_bytes(&mut self, n: u8);
 
     fn put_u16_bytes(&mut self, n: u16);
@@ -446,24 +433,23 @@ pub(crate) trait ByteBuf {
         self.put_u16_bytes(packet_identifier.0);
     }
 
-    fn put_slice_bytes(&mut self, src: &[u8]);
+    fn put_bytes(&mut self, src: bytes::Bytes);
 }
 
 impl ByteBuf for bytes::BytesMut {
-    fn reserve_bytes(&mut self, additional: usize) {
-        self.reserve(additional);
-    }
-
     fn put_u8_bytes(&mut self, n: u8) {
+        use bytes::BufMut;
         self.put_u8(n);
     }
 
     fn put_u16_bytes(&mut self, n: u16) {
+        use bytes::BufMut;
         self.put_u16(n);
     }
 
-    fn put_slice_bytes(&mut self, src: &[u8]) {
-        self.put_slice(src);
+    fn put_bytes(&mut self, src: bytes::Bytes) {
+        use bytes::BufMut;
+        self.put_slice(&src);
     }
 }
 
@@ -476,8 +462,6 @@ impl ByteCounter {
 }
 
 impl ByteBuf for ByteCounter {
-    fn reserve_bytes(&mut self, _: usize) {}
-
     fn put_u8_bytes(&mut self, _: u8) {
         self.0 += std::mem::size_of::<u8>();
     }
@@ -486,7 +470,7 @@ impl ByteBuf for ByteCounter {
         self.0 += std::mem::size_of::<u16>();
     }
 
-    fn put_slice_bytes(&mut self, src: &[u8]) {
+    fn put_bytes(&mut self, src: bytes::Bytes) {
         self.0 += src.len();
     }
 }

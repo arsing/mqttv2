@@ -56,7 +56,7 @@ struct Options {
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::new().filter_or(
         "MQTT3_LOG",
-        "mqtt3=debug,mqtt3::logging=trace,subscriber=info",
+        "mqtt3=debug,mqtt3::io=trace,subscriber=info",
     ))
     .init();
 
@@ -78,8 +78,8 @@ async fn main() {
         move || {
             let password = password.clone();
             Box::pin(async move {
-                let io = tokio::net::TcpStream::connect(&server).await;
-                io.map(|io| (io, password))
+                let (stream, sink) = common::tokio::connect(server).await?;
+                Ok::<_, std::io::Error>((stream, sink, password))
             })
         },
         max_reconnect_back_off,
@@ -109,6 +109,9 @@ async fn main() {
         }
     });
 
+    let mut stats_num_packets = 0;
+    let mut stats_start_time = std::time::Instant::now();
+
     while let Some(event) = client.next().await {
         let event = event.unwrap();
 
@@ -126,6 +129,16 @@ async fn main() {
                     publication.payload,
                     publication.qos,
                 ),
+            }
+
+            stats_num_packets += 1;
+
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(stats_start_time);
+            if elapsed > std::time::Duration::from_secs(1) {
+                eprintln!("packets: {} ({}/sec)", stats_num_packets, stats_num_packets * 1_000_000 / elapsed.as_micros());
+                stats_start_time = now;
+                stats_num_packets = 0;
             }
         }
     }

@@ -23,13 +23,13 @@ pub use subscriptions::{UpdateSubscriptionError, UpdateSubscriptionHandle};
 /// returned by [`Client::shutdown_handle`]. The `Client` becomes unusable after it has returned `None`
 /// and should be dropped.
 #[derive(Debug)]
-pub struct Client<IoS>(ClientState<IoS>)
+pub struct Client<C>(ClientState<C>)
 where
-    IoS: IoSource;
+    C: crate::io::Connector;
 
-impl<IoS> Client<IoS>
+impl<C> Client<C>
 where
-    IoS: IoSource,
+    C: crate::io::Connector,
 {
     /// Create a new client with the given parameters and a clean session.
     ///
@@ -40,9 +40,9 @@ where
     ///
     /// * `username`
     ///
-    ///     Optional username credential for the server. Note that password is provided via `io_source`.
+    ///     Optional username credential for the server. Note that password is provided via `connector`.
     ///
-    /// * `io_source`
+    /// * `connector`
     ///
     ///     The MQTT protocol is layered onto the I/O object returned by this source.
     ///
@@ -57,7 +57,7 @@ where
         client_id: Option<crate::proto::ByteStr>,
         username: Option<crate::proto::ByteStr>,
         will: Option<crate::proto::Publication>,
-        io_source: IoS,
+        connector: C,
         max_reconnect_back_off: std::time::Duration,
         keep_alive: std::time::Duration,
     ) -> Self {
@@ -70,7 +70,7 @@ where
 
         // TODO: username / password / will can be too large and prevent a CONNECT packet from being encoded.
         //       `Client::new()` should detect that and return an error.
-        //       But password is provided by the IoSource, so it can't be done here?
+        //       But password is provided by the Connector, so it can't be done here?
 
         Client(ClientState::Up {
             client_id,
@@ -83,7 +83,7 @@ where
 
             packet_identifiers: Default::default(),
 
-            connect: connect::Connect::new(io_source, max_reconnect_back_off),
+            connect: connect::Connect::new(connector, max_reconnect_back_off),
             ping: ping::State::BeginWaitingForNextPing,
             publish: Default::default(),
             subscriptions: Default::default(),
@@ -165,13 +165,14 @@ where
     }
 }
 
-impl<IoS> futures_core::Stream for Client<IoS>
+impl<C> futures_core::Stream for Client<C>
 where
     Self: Unpin,
-    IoS: IoSource,
-    <IoS as IoSource>::Io: Unpin,
-    <IoS as IoSource>::Error: std::fmt::Display,
-    <IoS as super::IoSource>::Future: Unpin,
+    C: crate::io::Connector,
+    <C as crate::io::Connector>::PacketStream: Unpin,
+    <C as crate::io::Connector>::PacketSink: Unpin,
+    <C as crate::io::Connector>::Error: std::fmt::Display,
+    <C as crate::io::Connector>::Future: Unpin,
 {
     type Item = Result<Event, Error>;
 
@@ -208,7 +209,8 @@ where
                     }
 
                     let connect::Connected {
-                        framed,
+                        stream,
+                        sink,
                         new_connection,
                         reset_session,
                     } = match connect.poll(
@@ -218,7 +220,7 @@ where
                         client_id,
                         *keep_alive,
                     ) {
-                        std::task::Poll::Ready(framed) => framed,
+                        std::task::Poll::Ready(connected) => connected,
                         std::task::Poll::Pending => return std::task::Poll::Pending,
                     };
 
@@ -243,7 +245,8 @@ where
 
                     match client_poll(
                         cx,
-                        framed,
+                        stream,
+                        sink,
                         *keep_alive,
                         packets_waiting_to_be_sent,
                         packet_identifiers,
@@ -303,14 +306,14 @@ where
 
                     reason,
                 } => {
-                    let connect::Connected { mut framed, .. } = match connect.poll(
+                    let connect::Connected { mut sink, .. } = match connect.poll(
                         cx,
                         username.as_ref(),
                         will.as_ref(),
                         client_id,
                         *keep_alive,
                     ) {
-                        std::task::Poll::Ready(framed) => framed,
+                        std::task::Poll::Ready(connected) => connected,
                         std::task::Poll::Pending => {
                             // Already disconnected
                             self.0 = ClientState::ShutDown {
@@ -322,7 +325,7 @@ where
 
                     loop {
                         if *sent_disconnect {
-                            match std::pin::Pin::new(&mut framed).poll_flush(cx) {
+                            match std::pin::Pin::new(&mut sink).poll_flush(cx) {
                                 std::task::Poll::Ready(Ok(())) => {
                                     self.0 = ClientState::ShutDown {
                                         reason: reason.take(),
@@ -342,11 +345,11 @@ where
                                 std::task::Poll::Pending => return std::task::Poll::Pending,
                             }
                         }
-                        match std::pin::Pin::new(&mut framed).poll_ready(cx) {
+                        match std::pin::Pin::new(&mut sink).poll_ready(cx) {
                             std::task::Poll::Ready(Ok(())) => {
                                 let packet =
                                     crate::proto::Packet::Disconnect(crate::proto::Disconnect);
-                                match std::pin::Pin::new(&mut framed).start_send(packet) {
+                                match std::pin::Pin::new(&mut sink).start_send(packet) {
                                     Ok(()) => *sent_disconnect = true,
 
                                     Err(err) => {
@@ -413,38 +416,6 @@ where
     }
 }
 
-/// This trait provides an I/O object and optional password that a [`Client`] can use.
-///
-/// The trait is automatically implemented for all [`FnMut`] that return a connection future.
-pub trait IoSource {
-    /// The I/O object
-    type Io: tokio::io::AsyncRead + tokio::io::AsyncWrite;
-
-    /// The error type for this I/O object's connection future.
-    type Error;
-
-    /// The connection future. Contains the I/O object and optional password.
-    type Future: Future<Output = Result<(Self::Io, Option<crate::proto::ByteStr>), Self::Error>>;
-
-    /// Attempts the connection and returns a [`Future`] that resolves when the connection succeeds
-    fn connect(&mut self) -> Self::Future;
-}
-
-impl<F, A, I, E> IoSource for F
-where
-    F: FnMut() -> A,
-    A: Future<Output = Result<(I, Option<crate::proto::ByteStr>), E>>,
-    I: tokio::io::AsyncRead + tokio::io::AsyncWrite,
-{
-    type Io = I;
-    type Error = E;
-    type Future = A;
-
-    fn connect(&mut self) -> Self::Future {
-        (self)()
-    }
-}
-
 /// An event generated by the [`Client`]
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
@@ -500,9 +471,9 @@ impl ShutdownHandle {
 }
 
 #[derive(Debug)]
-enum ClientState<IoS>
+enum ClientState<C>
 where
-    IoS: IoSource,
+    C: crate::io::Connector,
 {
     Up {
         client_id: crate::proto::ClientId,
@@ -515,12 +486,12 @@ where
 
         packet_identifiers: PacketIdentifiers,
 
-        connect: connect::Connect<IoS>,
+        connect: connect::Connect<C>,
         ping: ping::State,
         publish: publish::State,
         subscriptions: subscriptions::State,
 
-        /// Packets waiting to be written to the underlying `Framed`
+        /// Packets waiting to be written to the underlying `PacketSink`
         packets_waiting_to_be_sent: std::collections::VecDeque<crate::proto::Packet>,
     },
 
@@ -530,7 +501,7 @@ where
         will: Option<crate::proto::Publication>,
         keep_alive: std::time::Duration,
 
-        connect: connect::Connect<IoS>,
+        connect: connect::Connect<C>,
 
         /// If the DISCONNECT packet has already been sent
         sent_disconnect: bool,
@@ -545,10 +516,11 @@ where
     },
 }
 
-fn client_poll<S>(
+fn client_poll<PacketStream, PacketSink>(
     cx: &mut std::task::Context<'_>,
 
-    framed: &mut crate::logging_framed::LoggingFramed<S>,
+    stream: &mut PacketStream,
+    sink: &mut PacketSink,
     keep_alive: std::time::Duration,
     packets_waiting_to_be_sent: &mut std::collections::VecDeque<crate::proto::Packet>,
     packet_identifiers: &mut PacketIdentifiers,
@@ -557,18 +529,16 @@ fn client_poll<S>(
     subscriptions: &mut subscriptions::State,
 ) -> std::task::Poll<Result<Event, Error>>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    PacketStream: crate::io::PacketStream + Unpin,
+    PacketSink: crate::io::PacketSink + Unpin,
 {
-    use futures_core::Stream;
-    use futures_sink::Sink;
-
     loop {
         // Begin sending any packets waiting to be sent
         while let Some(packet) = packets_waiting_to_be_sent.pop_front() {
-            match std::pin::Pin::new(&mut *framed).poll_ready(cx) {
+            match std::pin::Pin::new(&mut *sink).poll_ready(cx) {
                 std::task::Poll::Ready(result) => {
                     let () = result.map_err(Error::EncodePacket)?;
-                    let () = std::pin::Pin::new(&mut *framed)
+                    let () = std::pin::Pin::new(&mut *sink)
                         .start_send(packet)
                         .map_err(Error::EncodePacket)?;
                 }
@@ -583,13 +553,13 @@ where
         // Finish sending any packets waiting to be sent.
         //
         // We don't care whether this returns Poll::Ready or Poll::Pending.
-        let _: std::task::Poll<_> = std::pin::Pin::new(&mut *framed)
+        let _: std::task::Poll<_> = std::pin::Pin::new(&mut *sink)
             .poll_flush(cx)
             .map_err(Error::EncodePacket)?;
 
         let mut continue_loop = false;
 
-        let mut packet = match std::pin::Pin::new(&mut *framed).poll_next(cx) {
+        let mut packet = match std::pin::Pin::new(&mut *stream).poll_next(cx) {
             std::task::Poll::Ready(Some(packet)) => {
                 let packet = packet.map_err(Error::DecodePacket)?;
 

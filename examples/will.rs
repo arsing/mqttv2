@@ -68,7 +68,7 @@ struct Options {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     env_logger::Builder::from_env(
-        env_logger::Env::new().filter_or("MQTT3_LOG", "mqtt3=debug,mqtt3::logging=trace,will=info"),
+        env_logger::Env::new().filter_or("MQTT3_LOG", "mqtt3=debug,mqtt3::io=trace,will=info"),
     )
     .init();
 
@@ -98,8 +98,8 @@ async fn main() {
         move || {
             let password = password.clone();
             Box::pin(async move {
-                let io = tokio::net::TcpStream::connect(&server).await;
-                io.map(|io| (io, password))
+                let (stream, sink) = common::tokio::connect(server).await?;
+                Ok::<_, std::io::Error>((stream, sink, password))
             })
         },
         max_reconnect_back_off,

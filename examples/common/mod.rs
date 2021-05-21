@@ -1,9 +1,14 @@
+#[cfg(feature = "transport-tokio")]
+pub(crate) mod tokio;
+
+#[allow(dead_code)]
 pub(crate) fn duration_from_secs_str(
     s: &str,
 ) -> Result<std::time::Duration, <u64 as std::str::FromStr>::Err> {
     Ok(std::time::Duration::from_secs(s.parse()?))
 }
 
+#[allow(dead_code)]
 pub(crate) fn qos_from_str(s: &str) -> Result<mqtt3::proto::QoS, String> {
     match s {
         "0" | "AtMostOnce" => Ok(mqtt3::proto::QoS::AtMostOnce),

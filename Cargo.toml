@@ -7,7 +7,6 @@ edition = "2018"
 
 [dependencies]
 bytes = { version = "1", default-features = false }
-tokio-util = { version = "0.6", default-features = false, features = ["codec"] }
 
 futures-core = { version = "0.3", optional = true, default-features = false }
 futures-channel = { version = "0.3", optional = true, default-features = false, features = [
@@ -25,7 +24,7 @@ tokio = { version = "1", optional = true, default-features = false }
 [dev-dependencies]
 env_logger = { version = "0.8", default-features = false, features = ["atty", "humantime", "termcolor"] }
 structopt = { version = "0.3", default-features = false }
-tokio = { version = "1", default-features = false, features = ["macros", "net", "rt", "signal"] }
+tokio = { version = "1", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "signal"] }
 
 [features]
 client = [
@@ -35,8 +34,11 @@ client = [
 ]
 server = [
 	"futures-util/std", # for futures_util::stream::FuturesUnordered
-	"tokio/net",
 	"_common",
+]
+transport-tokio = [
+	"tokio",
+	"tokio/net",
 ]
 _common = [
 	"futures-core",
@@ -44,7 +46,6 @@ _common = [
 	"futures-util",
 	"log",
 	"pin-project",
-	"tokio",
 ]
 
 [[example]]
@@ -62,3 +63,11 @@ required-features = ["client"]
 [[example]]
 name = "will"
 required-features = ["client"]
+
+[profile.release]
+codegen-units = 1
+debug = true
+incremental = false
+lto = true
+opt-level = 3
+panic = "abort"

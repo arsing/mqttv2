@@ -661,7 +661,7 @@ fn try_append_subscription(
 
     packet.subscribe_to.push(subscribe_to);
     let mut counter = crate::proto::ByteCounter::new();
-    match packet
+    match packet.clone()
         .encode(&mut counter)
         .and_then(|()| crate::proto::encode_remaining_length(counter.0, &mut counter))
     {
@@ -687,7 +687,7 @@ fn try_append_unsubscription(
 
     packet.unsubscribe_from.push(unsubscribe_from);
     let mut counter = crate::proto::ByteCounter::new();
-    match packet
+    match packet.clone()
         .encode(&mut counter)
         .and_then(|()| crate::proto::encode_remaining_length(counter.0, &mut counter))
     {

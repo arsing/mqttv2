@@ -1,5 +1,5 @@
-#[derive(Clone, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ByteStr(bytes::Bytes);
+#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ByteStr(pub(super) bytes::Bytes);
 
 impl ByteStr {
     #[allow(clippy::declare_interior_mutable_const)]
