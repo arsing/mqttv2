@@ -14,7 +14,9 @@ where
 {
     struct Run<L> where L: crate::io::Listener {
         server_state: ServerState<L>,
-        events: futures_util::stream::FuturesUnordered<RouterFuture<L>>,
+        events_accept: futures_util::stream::FuturesUnordered<RouterFutureAccept<L>>,
+        events_recv: futures_util::stream::FuturesUnordered<RouterFutureRecv<L>>,
+        events_send: futures_util::stream::FuturesUnordered<RouterFutureSend<L>>,
     }
 
     impl<L> std::future::Future for Run<L>
@@ -28,114 +30,16 @@ where
         fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
             let this = &mut *self;
 
-            while let Some(item) = futures_util::ready!(this.events.poll_next_unpin(cx)) {
-                match item {
-                    RouterEvent::AcceptedClient(listener, Ok((new_client_stream, new_client_sink))) => {
-                        this.events.push(auth_accepted_client(new_client_stream, new_client_sink));
-                        this.events.push(RouterFuture::Accepting { listener: Some(listener) });
-                    },
+            loop {
+                let mut all_pending = true;
 
-                    RouterEvent::AcceptedClient(listener, Err(err)) => {
-                        log::info!("dropping pre-accepted client because of error: {}", err);
-                        this.events.push(RouterFuture::Accepting { listener: Some(listener) });
-                    },
+                // Write as much as possible, then read once, then accept once.
 
-                    RouterEvent::ClientReady(Ok((new_client_id, new_client_stream, new_client_sink))) => {
-                        let client_id = this.server_state.add_client(new_client_id, new_client_sink);
+                while let std::task::Poll::Ready(Some(RouterEventSend { client_id, result })) = this.events_send.poll_next_unpin(cx) {
+                    log::trace!("RouterEventSend({:?})", client_id);
+                    all_pending = false;
 
-                        this.events.push(RouterFuture::ReadClient {
-                            inner: Some((client_id.clone(), new_client_stream)),
-                        });
-                    },
-
-                    RouterEvent::ClientReady(Err(err)) => {
-                        log::info!("dropping post-accepted client because of error: {}", err);
-                    },
-
-                    RouterEvent::ReadClient { client_id, result } => {
-                        match result {
-                            Ok((client_stream, packet)) => {
-                                #[allow(clippy::mutable_key_type)]
-                                let mut response_packets: std::collections::BTreeMap<crate::proto::ByteStr, Vec<crate::proto::Packet>> = Default::default();
-
-                                if let Some(client) = this.server_state.get_client_mut(&client_id) {
-                                    match packet {
-                                        crate::proto::Packet::PingReq(crate::proto::PingReq) =>
-                                            client.write(&mut this.events, crate::proto::Packet::PingResp(crate::proto::PingResp)),
-
-                                        crate::proto::Packet::Publish(crate::proto::Publish {
-                                            packet_identifier_dup_qos,
-                                            retain: _,
-                                            topic_name,
-                                            payload,
-                                        }) => {
-                                            match packet_identifier_dup_qos {
-                                                crate::proto::PacketIdentifierDupQoS::AtMostOnce => (),
-                                                crate::proto::PacketIdentifierDupQoS::AtLeastOnce(packet_identifier, _dup) => {
-                                                    client.write(&mut this.events, crate::proto::Packet::PubAck(crate::proto::PubAck {
-                                                        packet_identifier,
-                                                    }));
-                                                },
-                                                crate::proto::PacketIdentifierDupQoS::ExactlyOnce(_packet_identifier, _dup) => (),
-                                            }
-
-                                            if let Some(client_ids) = this.server_state.get_subscribers(&topic_name) {
-                                                for client_id in client_ids {
-                                                    response_packets.entry(client_id.clone()).or_default().push(crate::proto::Packet::Publish(crate::proto::Publish {
-                                                        packet_identifier_dup_qos,
-                                                        retain: false,
-                                                        topic_name: topic_name.clone(),
-                                                        payload: payload.clone(),
-                                                    }));
-                                                }
-                                            }
-                                        },
-
-                                        crate::proto::Packet::Subscribe(crate::proto::Subscribe {
-                                            packet_identifier,
-                                            subscribe_to,
-                                        }) => {
-                                            let mut sub_ack = crate::proto::SubAck {
-                                                packet_identifier,
-                                                qos: vec![],
-                                            };
-                                            for crate::proto::SubscribeTo { topic_filter, qos } in subscribe_to {
-                                                let qos = match qos {
-                                                    crate::proto::QoS::AtMostOnce | crate::proto::QoS::AtLeastOnce => qos,
-                                                    crate::proto::QoS::ExactlyOnce => crate::proto::QoS::AtLeastOnce,
-                                                };
-                                                this.server_state.subscribe(client_id.clone(), topic_filter.clone());
-                                                sub_ack.qos.push(crate::proto::SubAckQos::Success(qos));
-                                            }
-                                            let client = this.server_state.get_client_mut(&client_id).expect("got this client successfully just before this");
-                                            client.write(&mut this.events, crate::proto::Packet::SubAck(sub_ack));
-                                        },
-
-                                        _ => (),
-                                    }
-                                }
-
-                                this.events.push(RouterFuture::ReadClient {
-                                    inner: Some((client_id, client_stream)),
-                                });
-
-                                for (client_id, packets) in response_packets {
-                                    if let Some(client) = this.server_state.get_client_mut(&client_id) {
-                                        for packet in packets {
-                                            client.write(&mut this.events, packet);
-                                        }
-                                    }
-                                }
-                            },
-
-                            Err(err) => {
-                                log::info!("dropping unreadable client {} because of error: {}", client_id, err);
-                                this.server_state.drop_client(&client_id);
-                            },
-                        }
-                    },
-
-                    RouterEvent::WriteClient { client_id, result } => match result {
+                    match result {
                         Ok((client_sink, mut pending_packets)) =>
                             if let Some(client) = this.server_state.get_client_mut(&client_id) {
                                 if client.pending_packets.is_empty() {
@@ -143,9 +47,7 @@ where
                                 }
                                 else {
                                     std::mem::swap(&mut pending_packets, &mut client.pending_packets);
-                                    this.events.push(RouterFuture::WriteClient {
-                                        inner: Some((client_id, client_sink, pending_packets)),
-                                    });
+                                    this.events_send.push(RouterFutureSend(Some((client_id, client_sink, pending_packets))));
                                 }
                             },
 
@@ -153,11 +55,123 @@ where
                             log::info!("dropping unwritable client {} because of error: {}", client_id, err);
                             this.server_state.drop_client(&client_id);
                         },
-                    },
+                    }
+                }
+
+                if let std::task::Poll::Ready(Some(item)) = this.events_accept.poll_next_unpin(cx) {
+                    log::trace!("RouterEventAccept");
+                    all_pending = false;
+
+                    match item {
+                        RouterEventAccept::AcceptedClient(listener, Ok((new_client_stream, new_client_sink))) => {
+                            this.events_accept.push(auth_accepted_client(new_client_stream, new_client_sink));
+                            this.events_accept.push(RouterFutureAccept::Accepting { listener: Some(listener) });
+                        },
+
+                        RouterEventAccept::AcceptedClient(listener, Err(err)) => {
+                            log::info!("dropping pre-accepted client because of error: {}", err);
+                            this.events_accept.push(RouterFutureAccept::Accepting { listener: Some(listener) });
+                        },
+
+                        RouterEventAccept::ClientReady(Ok((new_client_id, new_client_stream, new_client_sink))) => {
+                            let client_id = this.server_state.add_client(new_client_id, new_client_sink);
+
+                            this.events_recv.push(RouterFutureRecv(Some((client_id.clone(), new_client_stream))));
+                        },
+
+                        RouterEventAccept::ClientReady(Err(err)) => {
+                            log::info!("dropping post-accepted client because of error: {}", err);
+                        },
+                    }
+                }
+
+                if let std::task::Poll::Ready(Some(RouterEventRecv { client_id, result })) = this.events_recv.poll_next_unpin(cx) {
+                    all_pending = false;
+
+                    match result {
+                        Ok((client_stream, packet)) => {
+                            #[allow(clippy::mutable_key_type)]
+                            let mut response_packets: std::collections::BTreeMap<crate::proto::ByteStr, Vec<crate::proto::Packet>> = Default::default();
+
+                            if let Some(client) = this.server_state.get_client_mut(&client_id) {
+                                match packet {
+                                    crate::proto::Packet::PingReq(crate::proto::PingReq) =>
+                                        client.write(&mut this.events_send, crate::proto::Packet::PingResp(crate::proto::PingResp)),
+
+                                    crate::proto::Packet::Publish(crate::proto::Publish {
+                                        packet_identifier_dup_qos,
+                                        retain: _,
+                                        topic_name,
+                                        payload,
+                                    }) => {
+                                        match packet_identifier_dup_qos {
+                                            crate::proto::PacketIdentifierDupQoS::AtMostOnce => (),
+                                            crate::proto::PacketIdentifierDupQoS::AtLeastOnce(packet_identifier, _dup) => {
+                                                client.write(&mut this.events_send, crate::proto::Packet::PubAck(crate::proto::PubAck {
+                                                    packet_identifier,
+                                                }));
+                                            },
+                                            crate::proto::PacketIdentifierDupQoS::ExactlyOnce(_packet_identifier, _dup) => (),
+                                        }
+
+                                        if let Some(client_ids) = this.server_state.get_subscribers(&topic_name) {
+                                            for client_id in client_ids {
+                                                response_packets.entry(client_id.clone()).or_default().push(crate::proto::Packet::Publish(crate::proto::Publish {
+                                                    packet_identifier_dup_qos,
+                                                    retain: false,
+                                                    topic_name: topic_name.clone(),
+                                                    payload: payload.clone(),
+                                                }));
+                                            }
+                                        }
+                                    },
+
+                                    crate::proto::Packet::Subscribe(crate::proto::Subscribe {
+                                        packet_identifier,
+                                        subscribe_to,
+                                    }) => {
+                                        let mut sub_ack = crate::proto::SubAck {
+                                            packet_identifier,
+                                            qos: vec![],
+                                        };
+                                        for crate::proto::SubscribeTo { topic_filter, qos } in subscribe_to {
+                                            let qos = match qos {
+                                                crate::proto::QoS::AtMostOnce | crate::proto::QoS::AtLeastOnce => qos,
+                                                crate::proto::QoS::ExactlyOnce => crate::proto::QoS::AtLeastOnce,
+                                            };
+                                            this.server_state.subscribe(client_id.clone(), topic_filter.clone());
+                                            sub_ack.qos.push(crate::proto::SubAckQos::Success(qos));
+                                        }
+                                        let client = this.server_state.get_client_mut(&client_id).expect("got this client successfully just before this");
+                                        client.write(&mut this.events_send, crate::proto::Packet::SubAck(sub_ack));
+                                    },
+
+                                    _ => (),
+                                }
+                            }
+
+                            this.events_recv.push(RouterFutureRecv(Some((client_id, client_stream))));
+
+                            for (client_id, packets) in response_packets {
+                                if let Some(client) = this.server_state.get_client_mut(&client_id) {
+                                    for packet in packets {
+                                        client.write(&mut this.events_send, packet);
+                                    }
+                                }
+                            }
+                        },
+
+                        Err(err) => {
+                            log::info!("dropping unreadable client {} because of error: {}", client_id, err);
+                            this.server_state.drop_client(&client_id);
+                        },
+                    }
+                }
+
+                if all_pending {
+                    return std::task::Poll::Pending;
                 }
             }
-
-            std::task::Poll::Ready(Ok(()))
         }
     }
 
@@ -165,7 +179,9 @@ where
 
     Run {
         server_state: Default::default(),
-        events: std::iter::once(RouterFuture::Accepting { listener: Some(listener) }).collect(),
+        events_accept: std::iter::once(RouterFutureAccept::Accepting { listener: Some(listener) }).collect(),
+        events_recv: Default::default(),
+        events_send: Default::default(),
     }
 }
 
@@ -257,13 +273,11 @@ struct ClientState<L> where L: crate::io::Listener {
 }
 
 impl<L> ClientState<L> where L: crate::io::Listener {
-    fn write(&mut self, events: &mut futures_util::stream::FuturesUnordered<RouterFuture<L>>, packet: crate::proto::Packet) {
+    fn write(&mut self, events: &mut futures_util::stream::FuturesUnordered<RouterFutureSend<L>>, packet: crate::proto::Packet) {
         if let Some((client_sink, mut pending_packets)) = self.client_sink_and_pending_packets.take() {
             pending_packets.extend(self.pending_packets.drain(..));
             pending_packets.push_back(packet);
-            events.push(RouterFuture::WriteClient {
-                inner: Some((self.client_id.clone(), client_sink, pending_packets)),
-            });
+            events.push(RouterFutureSend(Some((self.client_id.clone(), client_sink, pending_packets))));
         }
         else {
             self.pending_packets.push_back(packet);
@@ -271,7 +285,7 @@ impl<L> ClientState<L> where L: crate::io::Listener {
     }
 }
 
-enum RouterFuture<L> where L: crate::io::Listener {
+enum RouterFutureAccept<L> where L: crate::io::Listener {
     Accepting {
         listener: Option<L>,
     },
@@ -279,26 +293,18 @@ enum RouterFuture<L> where L: crate::io::Listener {
     ConnectingClient {
         inner: AuthAcceptedClientFuture<L>,
     },
-
-    ReadClient {
-        inner: Option<(crate::proto::ByteStr, <L as crate::io::Listener>::PacketStream)>,
-    },
-
-    WriteClient {
-        inner: Option<(crate::proto::ByteStr, <L as crate::io::Listener>::PacketSink, std::collections::VecDeque<crate::proto::Packet>)>,
-    },
 }
 
 fn auth_accepted_client<L>(
     mut stream: <L as crate::io::Listener>::PacketStream,
     mut sink: <L as crate::io::Listener>::PacketSink,
-) -> RouterFuture<L>
+) -> RouterFutureAccept<L>
 where
     L: crate::io::Listener + Unpin,
     <L as crate::io::Listener>::PacketStream: Unpin + 'static,
     <L as crate::io::Listener>::PacketSink: Unpin + 'static,
 {
-    RouterFuture::ConnectingClient {
+    RouterFutureAccept::ConnectingClient {
         inner: Box::pin(async move {
             let packet = stream.try_next().await?.ok_or(ServerError::ClientUnexpectedEof)?;
             let connect =
@@ -326,22 +332,22 @@ where
     }
 }
 
-impl<L> std::future::Future for RouterFuture<L>
+impl<L> std::future::Future for RouterFutureAccept<L>
 where
     L: crate::io::Listener + Unpin,
     <L as crate::io::Listener>::PacketStream: Unpin,
     <L as crate::io::Listener>::PacketSink: Unpin,
 {
-    type Output = RouterEvent<L>;
+    type Output = RouterEventAccept<L>;
 
     fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
         std::task::Poll::Ready(match &mut *self {
-            RouterFuture::Accepting { listener } => {
+            RouterFutureAccept::Accepting { listener } => {
                 let mut listener = listener.take().expect("polled after completion");
                 match listener.poll_accept(cx) {
-                    std::task::Poll::Ready(new_client) => RouterEvent::AcceptedClient(listener, new_client.map_err(ServerError::ClientAcceptFailed)),
+                    std::task::Poll::Ready(new_client) => RouterEventAccept::AcceptedClient(listener, new_client.map_err(ServerError::ClientAcceptFailed)),
                     std::task::Poll::Pending => {
-                        self.set(RouterFuture::Accepting {
+                        self.set(RouterFutureAccept::Accepting {
                             listener: Some(listener),
                         });
                         return std::task::Poll::Pending;
@@ -349,102 +355,118 @@ where
                 }
             },
 
-            RouterFuture::ConnectingClient { inner } => match inner.poll_unpin(cx) {
-                std::task::Poll::Ready(result) => RouterEvent::ClientReady(result),
+            RouterFutureAccept::ConnectingClient { inner } => match inner.poll_unpin(cx) {
+                std::task::Poll::Ready(result) => RouterEventAccept::ClientReady(result),
                 std::task::Poll::Pending => return std::task::Poll::Pending,
-            },
-
-            RouterFuture::ReadClient { inner } => {
-                let (client_id, mut client_stream) = inner.take().expect("polled after completion");
-                match client_stream.try_poll_next_unpin(cx) {
-                    std::task::Poll::Ready(packet) => {
-                        let result = match packet {
-                            Some(Ok(packet)) => Ok((client_stream, packet)),
-                            Some(Err(err)) => Err(err.into()),
-                            None => Err(ServerError::ClientUnexpectedEof),
-                        };
-                        RouterEvent::ReadClient {
-                            client_id,
-                            result,
-                        }
-                    },
-                    std::task::Poll::Pending => {
-                        self.set(RouterFuture::ReadClient {
-                            inner: Some((client_id, client_stream)),
-                        });
-                        return std::task::Poll::Pending;
-                    },
-                }
-            },
-
-            RouterFuture::WriteClient { inner } => {
-                let (client_id, mut client_sink, mut pending_packets) = inner.take().expect("polled after completion");
-
-                while let Some(packet) = pending_packets.pop_front() {
-                    match std::pin::Pin::new(&mut client_sink).poll_ready(cx) {
-                        std::task::Poll::Ready(Ok(())) =>
-                            match std::pin::Pin::new(&mut client_sink).start_send(packet) {
-                                Ok(()) => (),
-                                Err(err) => return std::task::Poll::Ready(RouterEvent::WriteClient {
-                                    client_id,
-                                    result: Err(err.into()),
-                                }),
-                            },
-
-                        std::task::Poll::Ready(Err(err)) =>
-                            return std::task::Poll::Ready(RouterEvent::WriteClient {
-                                client_id,
-                                result: Err(err.into()),
-                            }),
-
-                        std::task::Poll::Pending => {
-                            pending_packets.push_front(packet);
-                            self.set(RouterFuture::WriteClient {
-                                inner: Some((client_id, client_sink, pending_packets)),
-                            });
-                            return std::task::Poll::Pending;
-                        },
-                    }
-                }
-
-                match std::pin::Pin::new(&mut client_sink).poll_flush(cx) {
-                    std::task::Poll::Ready(Ok(())) => RouterEvent::WriteClient {
-                        client_id,
-                        result: Ok((client_sink, pending_packets)),
-                    },
-
-                    std::task::Poll::Ready(Err(err)) => RouterEvent::WriteClient {
-                        client_id,
-                        result: Err(err.into()),
-                    },
-
-                    std::task::Poll::Pending => {
-                        self.set(RouterFuture::WriteClient {
-                            inner: Some((client_id, client_sink, pending_packets)),
-                        });
-                        return std::task::Poll::Pending;
-                    },
-                }
-
             },
         })
     }
 }
 
-enum RouterEvent<L> where L: crate::io::Listener {
+enum RouterEventAccept<L> where L: crate::io::Listener {
     AcceptedClient(L, Result<(<L as crate::io::Listener>::PacketStream, <L as crate::io::Listener>::PacketSink), ServerError>),
 
     ClientReady(Result<(crate::proto::ClientId, <L as crate::io::Listener>::PacketStream, <L as crate::io::Listener>::PacketSink), ServerError>),
+}
 
-    ReadClient {
-        client_id: crate::proto::ByteStr,
-        result: Result<(<L as crate::io::Listener>::PacketStream, crate::proto::Packet), ServerError>,
-    },
+struct RouterFutureRecv<L>(Option<(crate::proto::ByteStr, <L as crate::io::Listener>::PacketStream)>) where L: crate::io::Listener;
 
-    WriteClient {
-        client_id: crate::proto::ByteStr,
-        result: Result<(<L as crate::io::Listener>::PacketSink, std::collections::VecDeque<crate::proto::Packet>), ServerError>,
-    },
+impl<L> std::future::Future for RouterFutureRecv<L>
+where
+    L: crate::io::Listener + Unpin,
+    <L as crate::io::Listener>::PacketStream: Unpin,
+    <L as crate::io::Listener>::PacketSink: Unpin,
+{
+    type Output = RouterEventRecv<L>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let (client_id, mut client_stream) = self.0.take().expect("polled after completion");
+        match client_stream.try_poll_next_unpin(cx) {
+            std::task::Poll::Ready(packet) => {
+                let result = match packet {
+                    Some(Ok(packet)) => Ok((client_stream, packet)),
+                    Some(Err(err)) => Err(err.into()),
+                    None => Err(ServerError::ClientUnexpectedEof),
+                };
+                std::task::Poll::Ready(RouterEventRecv {
+                    client_id,
+                    result,
+                })
+            },
+            std::task::Poll::Pending => {
+                self.set(RouterFutureRecv(Some((client_id, client_stream))));
+                std::task::Poll::Pending
+            },
+        }
+    }
+}
+
+struct RouterEventRecv<L> where L: crate::io::Listener {
+    client_id: crate::proto::ByteStr,
+    result: Result<(<L as crate::io::Listener>::PacketStream, crate::proto::Packet), ServerError>,
+}
+
+struct RouterFutureSend<L>(Option<(crate::proto::ByteStr, <L as crate::io::Listener>::PacketSink, std::collections::VecDeque<crate::proto::Packet>)>) where L: crate::io::Listener;
+
+impl<L> std::future::Future for RouterFutureSend<L>
+where
+    L: crate::io::Listener + Unpin,
+    <L as crate::io::Listener>::PacketStream: Unpin,
+    <L as crate::io::Listener>::PacketSink: Unpin,
+{
+    type Output = RouterEventSend<L>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        log::trace!("RouterFutureSend polled");
+        let (client_id, mut client_sink, mut pending_packets) = self.0.take().expect("polled after completion");
+
+        while let Some(packet) = pending_packets.pop_front() {
+            match std::pin::Pin::new(&mut client_sink).poll_ready(cx) {
+                std::task::Poll::Ready(Ok(())) =>
+                    match std::pin::Pin::new(&mut client_sink).start_send(packet) {
+                        Ok(()) => (),
+                        Err(err) => return std::task::Poll::Ready(RouterEventSend {
+                            client_id,
+                            result: Err(err.into()),
+                        }),
+                    },
+
+                std::task::Poll::Ready(Err(err)) =>
+                    return std::task::Poll::Ready(RouterEventSend {
+                        client_id,
+                        result: Err(err.into()),
+                    }),
+
+                std::task::Poll::Pending => {
+                    pending_packets.push_front(packet);
+                    self.set(RouterFutureSend(Some((client_id, client_sink, pending_packets))));
+                    return std::task::Poll::Pending;
+                },
+            }
+        }
+
+        std::task::Poll::Ready(match std::pin::Pin::new(&mut client_sink).poll_flush(cx) {
+            std::task::Poll::Ready(Ok(())) => RouterEventSend {
+                client_id,
+                result: Ok((client_sink, pending_packets)),
+            },
+
+            std::task::Poll::Ready(Err(err)) => RouterEventSend {
+                client_id,
+                result: Err(err.into()),
+            },
+
+            std::task::Poll::Pending => {
+                self.set(RouterFutureSend(Some((client_id, client_sink, pending_packets))));
+                return std::task::Poll::Pending;
+            },
+        })
+    }
+}
+
+struct RouterEventSend<L> where L: crate::io::Listener {
+    client_id: crate::proto::ByteStr,
+    result: Result<(<L as crate::io::Listener>::PacketSink, std::collections::VecDeque<crate::proto::Packet>), ServerError>,
 }
 
 #[derive(Debug)]

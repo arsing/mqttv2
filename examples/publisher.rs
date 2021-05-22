@@ -65,12 +65,6 @@ struct Options {
 
 #[tokio::main]
 async fn main() {
-    env_logger::Builder::from_env(env_logger::Env::new().filter_or(
-        "MQTT3_LOG",
-        "mqtt3=debug,mqtt3::io=trace,publisher=info",
-    ))
-    .init();
-
     let Options {
         server,
         client_id,
@@ -82,7 +76,7 @@ async fn main() {
         topic,
         qos,
         payload,
-    } = structopt::StructOpt::from_args();
+    } = common::init("publisher");
 
     let mut client = mqtt3::Client::new(
         client_id,
@@ -91,7 +85,7 @@ async fn main() {
         move || {
             let password = password.clone();
             Box::pin(async move {
-                let (stream, sink) = common::tokio::connect(server).await?;
+                let (stream, sink) = common::transport::tokio::connect(server).await?;
                 Ok::<_, std::io::Error>((stream, sink, password))
             })
         },
@@ -129,7 +123,7 @@ async fn main() {
             }
 
             let topic = topic.clone();
-            log::info!("Publishing to {} ...", topic);
+            log::debug!("Publishing to {} ...", topic);
 
             let mut publish_handle = publish_handle.clone();
             let payload = payload.clone();
@@ -144,7 +138,7 @@ async fn main() {
                     })
                     .await;
                 let () = result.expect("couldn't publish");
-                log::info!("Published to {}", topic);
+                log::debug!("Published to {}", topic);
                 Ok::<_, ()>(())
             };
             if interval.is_some() {

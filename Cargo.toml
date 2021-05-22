@@ -17,13 +17,14 @@ futures-sink = { version = "0.3", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = [
 	"sink",
 ] }
-log = { version = "0.4", optional = true, default-features = false }
+log = { version = "0.4", default-features = false }
 pin-project = { version = "1", optional = true, default-features = false }
 smol = { version = "1", optional = true, default-features = false }
 tokio = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
 env_logger = { version = "0.8", default-features = false, features = ["atty", "humantime", "termcolor"] }
+heapless = { version = "0.7", default-features = false }
 structopt = { version = "0.3", default-features = false }
 tokio = { version = "1", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "signal"] }
 
@@ -46,12 +47,12 @@ transport-smol = [
 transport-tokio = [
 	"tokio",
 	"tokio/net",
+	"tokio/time",
 ]
 _common = [
 	"futures-core",
 	"futures-sink",
 	"futures-util",
-	"log",
 	"pin-project",
 ]
 

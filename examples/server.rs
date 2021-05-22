@@ -16,7 +16,10 @@ struct Options {
 
 #[cfg(feature = "transport-smol")]
 fn main() {
-    let () = smol::block_on(main_inner());
+    let bind = init();
+    let listener = smol::block_on(common::transport::smol::Listener::bind(bind)).expect("bind failed");
+
+    let () = smol::block_on(mqtt3::server::run(listener)).expect("server failed");
 }
 
 #[cfg(feature = "transport-tokio")]
@@ -24,29 +27,19 @@ fn main() {
     let runtime =
         tokio::runtime::Builder::new_current_thread()
         .enable_io()
+        .enable_time()
         .build().expect("could not create runtime");
-
     let local_set = tokio::task::LocalSet::new();
 
-    let () = local_set.block_on(&runtime, tokio::task::unconstrained(main_inner()));
+    let bind = init();
+    let listener = local_set.block_on(&runtime, common::transport::tokio::Listener::bind(bind)).expect("bind failed");
+
+    let () = local_set.block_on(&runtime, tokio::task::unconstrained(mqtt3::server::run(listener))).expect("server failed");
 }
 
-async fn main_inner() {
-    env_logger::Builder::from_env(env_logger::Env::new().filter_or(
-        "MQTT3_LOG",
-        "mqtt3=debug,mqtt3::io=trace,server=info",
-    ))
-    .init();
-
+fn init() -> std::net::SocketAddr {
     let Options {
         bind,
-    } = structopt::StructOpt::from_args();
-
-    #[cfg(feature = "transport-smol")]
-    let listener = common::smol::Listener::bind(bind).await.expect("bind failed");
-
-    #[cfg(feature = "transport-tokio")]
-    let listener = common::tokio::Listener::bind(bind).await.expect("bind failed");
-
-    let () = mqtt3::server::run(listener).await.expect("server failed");
+    } = common::init("server");
+    bind
 }

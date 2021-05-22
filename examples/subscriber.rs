@@ -54,12 +54,6 @@ struct Options {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    env_logger::Builder::from_env(env_logger::Env::new().filter_or(
-        "MQTT3_LOG",
-        "mqtt3=debug,mqtt3::io=trace,subscriber=info",
-    ))
-    .init();
-
     let Options {
         server,
         client_id,
@@ -69,7 +63,7 @@ async fn main() {
         keep_alive,
         topic_filter,
         qos,
-    } = structopt::StructOpt::from_args();
+    } = common::init("subscriber");
 
     let mut client = mqtt3::Client::new(
         client_id,
@@ -78,7 +72,7 @@ async fn main() {
         move || {
             let password = password.clone();
             Box::pin(async move {
-                let (stream, sink) = common::tokio::connect(server).await?;
+                let (stream, sink) = common::transport::tokio::connect(server).await?;
                 Ok::<_, std::io::Error>((stream, sink, password))
             })
         },
@@ -109,21 +103,20 @@ async fn main() {
         }
     });
 
-    let mut stats_num_packets = 0;
-    let mut stats_start_time = std::time::Instant::now();
+    let mut packet_stats: common::PacketStats = Default::default();
 
     while let Some(event) = client.next().await {
         let event = event.unwrap();
 
         if let mqtt3::Event::Publication(publication) = event {
             match std::str::from_utf8(&publication.payload) {
-                Ok(s) => log::info!(
+                Ok(s) => log::debug!(
                     "Received publication: {:?} {:?} {:?}",
                     publication.topic_name,
                     s,
                     publication.qos,
                 ),
-                Err(_) => log::info!(
+                Err(_) => log::debug!(
                     "Received publication: {:?} {:?} {:?}",
                     publication.topic_name,
                     publication.payload,
@@ -131,15 +124,7 @@ async fn main() {
                 ),
             }
 
-            stats_num_packets += 1;
-
-            let now = std::time::Instant::now();
-            let elapsed = now.duration_since(stats_start_time);
-            if elapsed > std::time::Duration::from_secs(1) {
-                eprintln!("packets: {} ({}/sec)", stats_num_packets, stats_num_packets * 1_000_000 / elapsed.as_micros());
-                stats_start_time = now;
-                stats_num_packets = 0;
-            }
+            packet_stats.count(1);
         }
     }
 }

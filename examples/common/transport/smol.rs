@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 
 #[cfg(feature = "client")]
 pub(crate) async fn connect(addr: impl smol::net::AsyncToSocketAddrs) -> std::io::Result<(impl mqtt3::io::PacketStream, impl mqtt3::io::PacketSink)> {
@@ -10,16 +10,13 @@ pub(crate) async fn connect(addr: impl smol::net::AsyncToSocketAddrs) -> std::io
     let stream = IoStream {
         io: smol::net::TcpStream::from_std(stream)?,
         decoder: Default::default(),
-        read_state: ReadState::WaitingForMore(bytes::BytesMut::with_capacity(1024)),
+        read_state: super::ReadState::WaitingForMore(bytes::BytesMut::with_capacity(1024)),
     };
 
     let sink = IoSink {
         io: smol::net::TcpStream::from_std(sink)?,
-        write_state: WriteState {
-            in_progress: Default::default(),
-            prev: Default::default(),
-            curr: bytes::BytesMut::with_capacity(1024),
-        },
+        write_state: Default::default(),
+        buffer_timeout: smol::Time::after(super::BUFFER_TIME),
     };
 
     Ok(mqtt3::io::logging(stream, sink))
@@ -59,16 +56,13 @@ impl mqtt3::io::Listener for Listener {
         let stream_ = IoStream {
             io: stream.clone(),
             decoder: Default::default(),
-            read_state: ReadState::WaitingForMore(bytes::BytesMut::with_capacity(1024)),
+            read_state: super::ReadState::WaitingForMore(bytes::BytesMut::with_capacity(1024)),
         };
 
         let sink = IoSink {
             io: stream,
-            write_state: WriteState {
-                in_progress: Default::default(),
-                prev: Default::default(),
-                curr: bytes::BytesMut::with_capacity(1024),
-            },
+            write_state: Default::default(),
+            buffer_timeout: smol::Timer::after(super::BUFFER_TIME),
         };
 
         std::task::Poll::Ready(Ok(mqtt3::io::logging(stream_, sink)))
@@ -79,7 +73,7 @@ impl mqtt3::io::Listener for Listener {
 pub(crate) struct IoStream<Io> {
     #[pin] io: Io,
     decoder: mqtt3::proto::PacketDecoder,
-    read_state: ReadState,
+    read_state: super::ReadState,
 }
 
 impl<Io> futures_core::Stream for IoStream<Io> where Io: smol::io::AsyncRead {
@@ -90,7 +84,7 @@ impl<Io> futures_core::Stream for IoStream<Io> where Io: smol::io::AsyncRead {
 
         loop {
             match this.read_state {
-                ReadState::WaitingForMore(buf) => {
+                super::ReadState::WaitingForMore(buf) => {
                     let mut read_buf = as_read_buf(buf);
 
                     let read = match this.io.as_mut().poll_read(cx, &mut read_buf)? {
@@ -103,24 +97,19 @@ impl<Io> futures_core::Stream for IoStream<Io> where Io: smol::io::AsyncRead {
                     }
 
                     unsafe { buf.advance_mut(read); }
-                    *this.read_state = ReadState::MightBeEnough(std::mem::take(buf));
+                    *this.read_state = super::ReadState::MightBeEnough(std::mem::take(buf));
                 },
 
-                ReadState::MightBeEnough(buf) => {
+                super::ReadState::MightBeEnough(buf) => {
                     if let Some(packet) = mqtt3::proto::decode(this.decoder, buf)? {
                         return std::task::Poll::Ready(Some(Ok(packet)));
                     }
 
-                    *this.read_state = ReadState::WaitingForMore(std::mem::take(buf));
+                    *this.read_state = super::ReadState::WaitingForMore(std::mem::take(buf));
                 },
             }
         }
     }
-}
-
-enum ReadState {
-    WaitingForMore(bytes::BytesMut),
-    MightBeEnough(bytes::BytesMut),
 }
 
 fn as_read_buf(buf: &'_ mut bytes::BytesMut) -> &'_ mut [u8] {
@@ -150,14 +139,20 @@ fn as_read_buf(buf: &'_ mut bytes::BytesMut) -> &'_ mut [u8] {
 #[pin_project::pin_project]
 pub(crate) struct IoSink<Io> {
     #[pin] io: Io,
-    write_state: WriteState,
+    write_state: super::WriteState,
+    buffer_timeout: smol::Timer,
 }
 
 impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: smol::io::AsyncWrite {
     type Error = mqtt3::proto::EncodeError;
 
-    fn poll_ready(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
+    fn poll_ready(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        if self.as_mut().project().write_state.prev.len() < super::NUM_IO_SLICES {
+            std::task::Poll::Ready(Ok(()))
+        }
+        else {
+            self.poll_flush(cx)
+        }
     }
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: mqtt3::proto::Packet) -> Result<(), Self::Error> {
@@ -169,20 +164,23 @@ impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: smol:
     fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
         let mut this = self.project();
 
-        loop {
-            {
-                let mut dst = [std::io::IoSlice::new(b""); 64];
+        if this.write_state.prepare_for_write() {
+            if this.write_state.prev.len() < super::NUM_IO_SLICES {
+                use std::future::Future;
+
+                match std::pin::Pin::new(&mut *this.buffer_timeout).poll(cx) {
+                    std::task::Poll::Ready(_) => (),
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
+            }
+
+            while this.write_state.prepare_for_write() {
+                let mut dst = [std::io::IoSlice::new(b""); super::NUM_IO_SLICES];
                 let num_chunks = this.write_state.chunks_vectored(&mut dst);
-                if num_chunks > 0 {
-                    match this.io.as_mut().poll_write_vectored(cx, &dst[..num_chunks])? {
-                        std::task::Poll::Ready(0) => {
-                            return std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()));
-                        },
-                        std::task::Poll::Ready(written) => {
-                            this.write_state.advance(written);
-                        },
-                        std::task::Poll::Pending => return std::task::Poll::Pending,
-                    }
+                match this.io.as_mut().poll_write_vectored(cx, &dst[..num_chunks])? {
+                    std::task::Poll::Ready(0) => return std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())),
+                    std::task::Poll::Ready(written) => this.write_state.advance(written),
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
                 }
             }
 
@@ -190,12 +188,9 @@ impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: smol:
                 std::task::Poll::Ready(()) => (),
                 std::task::Poll::Pending => return std::task::Poll::Pending,
             }
-
-            if this.write_state.in_progress.is_empty() {
-                break;
-            }
         }
 
+        this.buffer_timeout.set_after(super::BUFFER_TIME);
         std::task::Poll::Ready(Ok(()))
     }
 
@@ -211,58 +206,5 @@ impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: smol:
         }
 
         std::task::Poll::Ready(Ok(()))
-    }
-}
-
-struct WriteState {
-    in_progress: std::collections::VecDeque<bytes::Bytes>,
-    prev: std::collections::VecDeque<bytes::Bytes>,
-    curr: bytes::BytesMut,
-}
-
-impl WriteState {
-    fn chunks_vectored<'a>(&'a mut self, dst: &mut [std::io::IoSlice<'a>]) -> usize {
-        if self.in_progress.is_empty() {
-            std::mem::swap(&mut self.in_progress, &mut self.prev);
-            if !self.curr.is_empty() {
-                self.in_progress.push_back(self.curr.split().freeze());
-            }
-        }
-
-        for (dst, src) in dst.iter_mut().zip(&self.in_progress) {
-            *dst = std::io::IoSlice::new(&**src);
-        }
-        std::cmp::min(self.in_progress.len(), dst.len())
-    }
-
-    fn advance(&mut self, mut cnt: usize) {
-        while let Some(mut buf) = self.in_progress.pop_front() {
-            if cnt < buf.len() {
-                buf.advance(cnt);
-                self.in_progress.push_front(buf);
-                cnt = 0;
-                break;
-            }
-
-            cnt -= buf.len();
-        }
-        assert_eq!(cnt, 0);
-    }
-}
-
-impl mqtt3::proto::ByteBuf for WriteState {
-    fn put_u8_bytes(&mut self, n: u8) {
-        self.curr.put_u8(n);
-    }
-
-    fn put_u16_bytes(&mut self, n: u16) {
-        self.curr.put_u16(n);
-    }
-
-    fn put_bytes(&mut self, src: bytes::Bytes) {
-        if !self.curr.is_empty() {
-            self.prev.push_back(std::mem::take(&mut self.curr).freeze());
-        }
-        self.prev.push_back(src);
     }
 }
