@@ -1,5 +1,8 @@
 // Example:
 //
+// smol transport:
+//     cargo run --features server,transport-smol --example server -- --bind '[::]:1883'
+//
 // tokio transport:
 //     cargo run --features server,transport-tokio --example server -- --bind '[::]:1883'
 
@@ -9,6 +12,11 @@ mod common;
 struct Options {
     #[structopt(help = "Address of the MQTT server.", long)]
     bind: std::net::SocketAddr,
+}
+
+#[cfg(feature = "transport-smol")]
+fn main() {
+    let () = smol::block_on(main_inner());
 }
 
 #[cfg(feature = "transport-tokio")]
@@ -33,6 +41,9 @@ async fn main_inner() {
     let Options {
         bind,
     } = structopt::StructOpt::from_args();
+
+    #[cfg(feature = "transport-smol")]
+    let listener = common::smol::Listener::bind(bind).await.expect("bind failed");
 
     #[cfg(feature = "transport-tokio")]
     let listener = common::tokio::Listener::bind(bind).await.expect("bind failed");
