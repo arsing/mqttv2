@@ -1,150 +1,172 @@
 use futures_sink::Sink;
-use futures_util::{SinkExt, StreamExt, TryStreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt, TryStreamExt};
 
-pub async fn run<L>(listener: L) -> std::io::Result<()>
+type AuthAcceptedClientFuture<L> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<
+    (crate::proto::ClientId, <L as crate::io::Listener>::PacketStream, <L as crate::io::Listener>::PacketSink),
+    ServerError,
+>>>>;
+
+pub fn run<L>(listener: L) -> impl std::future::Future<Output = std::io::Result<()>>
 where
     L: crate::io::Listener + Unpin,
-    <L as crate::io::Listener>::PacketStream: Unpin,
-    <L as crate::io::Listener>::PacketSink: Unpin,
+    <L as crate::io::Listener>::PacketStream: Unpin + 'static,
+    <L as crate::io::Listener>::PacketSink: Unpin + 'static,
 {
-    log::info!("Starting server...");
+    struct Run<L> where L: crate::io::Listener {
+        server_state: ServerState<L>,
+        events: futures_util::stream::FuturesUnordered<RouterFuture<L>>,
+    }
 
-    let mut server_state: ServerState<L> = Default::default();
+    impl<L> std::future::Future for Run<L>
+    where
+        L: crate::io::Listener + Unpin,
+        <L as crate::io::Listener>::PacketStream: Unpin + 'static,
+        <L as crate::io::Listener>::PacketSink: Unpin + 'static,
+    {
+        type Output = std::io::Result<()>;
 
-    let mut events = futures_util::stream::FuturesUnordered::new();
+        fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+            let this = &mut *self;
 
-    events.push(RouterFuture::Accepting { listener: Some(listener) });
+            while let Some(item) = futures_util::ready!(this.events.poll_next_unpin(cx)) {
+                match item {
+                    RouterEvent::AcceptedClient(listener, Ok((new_client_stream, new_client_sink))) => {
+                        this.events.push(auth_accepted_client(new_client_stream, new_client_sink));
+                        this.events.push(RouterFuture::Accepting { listener: Some(listener) });
+                    },
 
-    while let Some(item) = events.next().await {
-        match item {
-            RouterEvent::AcceptedClient(listener, Ok((new_client_stream, new_client_sink))) => {
-                events.push(auth_accepted_client(new_client_stream, new_client_sink));
-                events.push(RouterFuture::Accepting { listener: Some(listener) });
-            },
+                    RouterEvent::AcceptedClient(listener, Err(err)) => {
+                        log::info!("dropping pre-accepted client because of error: {}", err);
+                        this.events.push(RouterFuture::Accepting { listener: Some(listener) });
+                    },
 
-            RouterEvent::AcceptedClient(listener, Err(err)) => {
-                log::info!("dropping pre-accepted client because of error: {}", err);
-                events.push(RouterFuture::Accepting { listener: Some(listener) });
-            },
+                    RouterEvent::ClientReady(Ok((new_client_id, new_client_stream, new_client_sink))) => {
+                        let client_id = this.server_state.add_client(new_client_id, new_client_sink);
 
-            RouterEvent::ClientReady(Ok((new_client_id, new_client_stream, new_client_sink))) => {
-                let client_id = server_state.add_client(new_client_id, new_client_sink);
+                        this.events.push(RouterFuture::ReadClient {
+                            inner: Some((client_id.clone(), new_client_stream)),
+                        });
+                    },
 
-                events.push(RouterFuture::ReadClient {
-                    inner: Some((client_id.clone(), new_client_stream)),
-                });
-            },
+                    RouterEvent::ClientReady(Err(err)) => {
+                        log::info!("dropping post-accepted client because of error: {}", err);
+                    },
 
-            RouterEvent::ClientReady(Err(err)) => {
-                log::info!("dropping post-accepted client because of error: {}", err);
-            },
+                    RouterEvent::ReadClient { client_id, result } => {
+                        match result {
+                            Ok((client_stream, packet)) => {
+                                #[allow(clippy::mutable_key_type)]
+                                let mut response_packets: std::collections::BTreeMap<crate::proto::ByteStr, Vec<crate::proto::Packet>> = Default::default();
 
-            RouterEvent::ReadClient { client_id, result } => {
-                match result {
-                    Ok((client_stream, packet)) => {
-                        #[allow(clippy::mutable_key_type)]
-                        let mut response_packets: std::collections::BTreeMap<crate::proto::ByteStr, Vec<crate::proto::Packet>> = Default::default();
+                                if let Some(client) = this.server_state.get_client_mut(&client_id) {
+                                    match packet {
+                                        crate::proto::Packet::PingReq(crate::proto::PingReq) =>
+                                            client.write(&mut this.events, crate::proto::Packet::PingResp(crate::proto::PingResp)),
 
-                        if let Some(client) = server_state.get_client_mut(&client_id) {
-                            match packet {
-                                crate::proto::Packet::PingReq(crate::proto::PingReq) =>
-                                    client.write(&mut events, crate::proto::Packet::PingResp(crate::proto::PingResp)),
+                                        crate::proto::Packet::Publish(crate::proto::Publish {
+                                            packet_identifier_dup_qos,
+                                            retain: _,
+                                            topic_name,
+                                            payload,
+                                        }) => {
+                                            match packet_identifier_dup_qos {
+                                                crate::proto::PacketIdentifierDupQoS::AtMostOnce => (),
+                                                crate::proto::PacketIdentifierDupQoS::AtLeastOnce(packet_identifier, _dup) => {
+                                                    client.write(&mut this.events, crate::proto::Packet::PubAck(crate::proto::PubAck {
+                                                        packet_identifier,
+                                                    }));
+                                                },
+                                                crate::proto::PacketIdentifierDupQoS::ExactlyOnce(_packet_identifier, _dup) => (),
+                                            }
 
-                                crate::proto::Packet::Publish(crate::proto::Publish {
-                                    packet_identifier_dup_qos,
-                                    retain: _,
-                                    topic_name,
-                                    payload,
-                                }) => {
-                                    match packet_identifier_dup_qos {
-                                        crate::proto::PacketIdentifierDupQoS::AtMostOnce => (),
-                                        crate::proto::PacketIdentifierDupQoS::AtLeastOnce(packet_identifier, _dup) => {
-                                            client.write(&mut events, crate::proto::Packet::PubAck(crate::proto::PubAck {
-                                                packet_identifier,
-                                            }));
+                                            if let Some(client_ids) = this.server_state.get_subscribers(&topic_name) {
+                                                for client_id in client_ids {
+                                                    response_packets.entry(client_id.clone()).or_default().push(crate::proto::Packet::Publish(crate::proto::Publish {
+                                                        packet_identifier_dup_qos,
+                                                        retain: false,
+                                                        topic_name: topic_name.clone(),
+                                                        payload: payload.clone(),
+                                                    }));
+                                                }
+                                            }
                                         },
-                                        crate::proto::PacketIdentifierDupQoS::ExactlyOnce(_packet_identifier, _dup) => (),
-                                    }
 
-                                    if let Some(client_ids) = server_state.get_subscribers(&topic_name) {
-                                        for client_id in client_ids {
-                                            response_packets.entry(client_id.clone()).or_default().push(crate::proto::Packet::Publish(crate::proto::Publish {
-                                                packet_identifier_dup_qos,
-                                                retain: false,
-                                                topic_name: topic_name.clone(),
-                                                payload: payload.clone(),
-                                            }));
+                                        crate::proto::Packet::Subscribe(crate::proto::Subscribe {
+                                            packet_identifier,
+                                            subscribe_to,
+                                        }) => {
+                                            let mut sub_ack = crate::proto::SubAck {
+                                                packet_identifier,
+                                                qos: vec![],
+                                            };
+                                            for crate::proto::SubscribeTo { topic_filter, qos } in subscribe_to {
+                                                let qos = match qos {
+                                                    crate::proto::QoS::AtMostOnce | crate::proto::QoS::AtLeastOnce => qos,
+                                                    crate::proto::QoS::ExactlyOnce => crate::proto::QoS::AtLeastOnce,
+                                                };
+                                                this.server_state.subscribe(client_id.clone(), topic_filter.clone());
+                                                sub_ack.qos.push(crate::proto::SubAckQos::Success(qos));
+                                            }
+                                            let client = this.server_state.get_client_mut(&client_id).expect("got this client successfully just before this");
+                                            client.write(&mut this.events, crate::proto::Packet::SubAck(sub_ack));
+                                        },
+
+                                        _ => (),
+                                    }
+                                }
+
+                                this.events.push(RouterFuture::ReadClient {
+                                    inner: Some((client_id, client_stream)),
+                                });
+
+                                for (client_id, packets) in response_packets {
+                                    if let Some(client) = this.server_state.get_client_mut(&client_id) {
+                                        for packet in packets {
+                                            client.write(&mut this.events, packet);
                                         }
                                     }
-                                },
-
-                                crate::proto::Packet::Subscribe(crate::proto::Subscribe {
-                                    packet_identifier,
-                                    subscribe_to,
-                                }) => {
-                                    let mut sub_ack = crate::proto::SubAck {
-                                        packet_identifier,
-                                        qos: vec![],
-                                    };
-                                    for crate::proto::SubscribeTo { topic_filter, qos } in subscribe_to {
-                                        let qos = match qos {
-                                            crate::proto::QoS::AtMostOnce | crate::proto::QoS::AtLeastOnce => qos,
-                                            crate::proto::QoS::ExactlyOnce => crate::proto::QoS::AtLeastOnce,
-                                        };
-                                        server_state.subscribe(client_id.clone(), topic_filter.clone());
-                                        sub_ack.qos.push(crate::proto::SubAckQos::Success(qos));
-                                    }
-                                    let client = server_state.get_client_mut(&client_id).expect("got this client successfully just before this");
-                                    client.write(&mut events, crate::proto::Packet::SubAck(sub_ack));
-                                },
-
-                                _ => (),
-                            }
-                        }
-
-                        events.push(RouterFuture::ReadClient {
-                            inner: Some((client_id, client_stream)),
-                        });
-
-                        for (client_id, packets) in response_packets {
-                            if let Some(client) = server_state.get_client_mut(&client_id) {
-                                for packet in packets {
-                                    client.write(&mut events, packet);
                                 }
-                            }
+                            },
+
+                            Err(err) => {
+                                log::info!("dropping unreadable client {} because of error: {}", client_id, err);
+                                this.server_state.drop_client(&client_id);
+                            },
                         }
                     },
 
-                    Err(err) => {
-                        log::info!("dropping unreadable client {} because of error: {}", client_id, err);
-                        server_state.drop_client(&client_id);
+                    RouterEvent::WriteClient { client_id, result } => match result {
+                        Ok((client_sink, mut pending_packets)) =>
+                            if let Some(client) = this.server_state.get_client_mut(&client_id) {
+                                if client.pending_packets.is_empty() {
+                                    client.client_sink_and_pending_packets = Some((client_sink, pending_packets))
+                                }
+                                else {
+                                    std::mem::swap(&mut pending_packets, &mut client.pending_packets);
+                                    this.events.push(RouterFuture::WriteClient {
+                                        inner: Some((client_id, client_sink, pending_packets)),
+                                    });
+                                }
+                            },
+
+                        Err(err) => {
+                            log::info!("dropping unwritable client {} because of error: {}", client_id, err);
+                            this.server_state.drop_client(&client_id);
+                        },
                     },
                 }
-            },
+            }
 
-            RouterEvent::WriteClient { client_id, result } => match result {
-                Ok((client_sink, mut pending_packets)) =>
-                    if let Some(client) = server_state.get_client_mut(&client_id) {
-                        if client.pending_packets.is_empty() {
-                            client.client_sink_and_pending_packets = Some((client_sink, pending_packets))
-                        }
-                        else {
-                            std::mem::swap(&mut pending_packets, &mut client.pending_packets);
-                            events.push(RouterFuture::WriteClient {
-                                inner: Some((client_id, client_sink, pending_packets)),
-                            });
-                        }
-                    },
-
-                Err(err) => {
-                    log::info!("dropping unwritable client {} because of error: {}", client_id, err);
-                    server_state.drop_client(&client_id);
-                },
-            },
+            std::task::Poll::Ready(Ok(()))
         }
     }
 
-    Ok(())
+    log::info!("Starting server...");
+
+    Run {
+        server_state: Default::default(),
+        events: std::iter::once(RouterFuture::Accepting { listener: Some(listener) }).collect(),
+    }
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -235,7 +257,7 @@ struct ClientState<L> where L: crate::io::Listener {
 }
 
 impl<L> ClientState<L> where L: crate::io::Listener {
-    fn write<A>(&mut self, events: &mut futures_util::stream::FuturesUnordered<RouterFuture<L, A>>, packet: crate::proto::Packet) {
+    fn write(&mut self, events: &mut futures_util::stream::FuturesUnordered<RouterFuture<L>>, packet: crate::proto::Packet) {
         if let Some((client_sink, mut pending_packets)) = self.client_sink_and_pending_packets.take() {
             pending_packets.extend(self.pending_packets.drain(..));
             pending_packets.push_back(packet);
@@ -249,14 +271,13 @@ impl<L> ClientState<L> where L: crate::io::Listener {
     }
 }
 
-#[pin_project::pin_project(project = RouterFutureProj)]
-enum RouterFuture<L, A> where L: crate::io::Listener {
+enum RouterFuture<L> where L: crate::io::Listener {
     Accepting {
         listener: Option<L>,
     },
 
     ConnectingClient {
-        #[pin] inner: A,
+        inner: AuthAcceptedClientFuture<L>,
     },
 
     ReadClient {
@@ -271,18 +292,14 @@ enum RouterFuture<L, A> where L: crate::io::Listener {
 fn auth_accepted_client<L>(
     mut stream: <L as crate::io::Listener>::PacketStream,
     mut sink: <L as crate::io::Listener>::PacketSink,
-) ->
-    RouterFuture<L, impl std::future::Future<Output = Result<
-        (crate::proto::ClientId, <L as crate::io::Listener>::PacketStream, <L as crate::io::Listener>::PacketSink),
-        ServerError,
-    >>>
+) -> RouterFuture<L>
 where
     L: crate::io::Listener + Unpin,
-    <L as crate::io::Listener>::PacketStream: Unpin,
-    <L as crate::io::Listener>::PacketSink: Unpin,
+    <L as crate::io::Listener>::PacketStream: Unpin + 'static,
+    <L as crate::io::Listener>::PacketSink: Unpin + 'static,
 {
     RouterFuture::ConnectingClient {
-        inner: async move {
+        inner: Box::pin(async move {
             let packet = stream.try_next().await?.ok_or(ServerError::ClientUnexpectedEof)?;
             let connect =
                 if let crate::proto::Packet::Connect(connect) = packet {
@@ -305,22 +322,21 @@ where
             })).await?;
 
             Ok((connect.client_id, stream, sink))
-        },
+        }),
     }
 }
 
-impl<L, A> std::future::Future for RouterFuture<L, A>
+impl<L> std::future::Future for RouterFuture<L>
 where
-    L: crate::io::Listener,
+    L: crate::io::Listener + Unpin,
     <L as crate::io::Listener>::PacketStream: Unpin,
     <L as crate::io::Listener>::PacketSink: Unpin,
-    A: std::future::Future<Output = Result<(crate::proto::ClientId, <L as crate::io::Listener>::PacketStream, <L as crate::io::Listener>::PacketSink), ServerError>>,
 {
     type Output = RouterEvent<L>;
 
     fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        std::task::Poll::Ready(match self.as_mut().project() {
-            RouterFutureProj::Accepting { listener } => {
+        std::task::Poll::Ready(match &mut *self {
+            RouterFuture::Accepting { listener } => {
                 let mut listener = listener.take().expect("polled after completion");
                 match listener.poll_accept(cx) {
                     std::task::Poll::Ready(new_client) => RouterEvent::AcceptedClient(listener, new_client.map_err(ServerError::ClientAcceptFailed)),
@@ -333,12 +349,12 @@ where
                 }
             },
 
-            RouterFutureProj::ConnectingClient { inner } => match inner.poll(cx) {
+            RouterFuture::ConnectingClient { inner } => match inner.poll_unpin(cx) {
                 std::task::Poll::Ready(result) => RouterEvent::ClientReady(result),
                 std::task::Poll::Pending => return std::task::Poll::Pending,
             },
 
-            RouterFutureProj::ReadClient { inner } => {
+            RouterFuture::ReadClient { inner } => {
                 let (client_id, mut client_stream) = inner.take().expect("polled after completion");
                 match client_stream.try_poll_next_unpin(cx) {
                     std::task::Poll::Ready(packet) => {
@@ -361,7 +377,7 @@ where
                 }
             },
 
-            RouterFutureProj::WriteClient { inner } => {
+            RouterFuture::WriteClient { inner } => {
                 let (client_id, mut client_sink, mut pending_packets) = inner.take().expect("polled after completion");
 
                 while let Some(packet) = pending_packets.pop_front() {
