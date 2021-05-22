@@ -19,12 +19,16 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 ] }
 log = { version = "0.4", optional = true, default-features = false }
 pin-project = { version = "1", optional = true, default-features = false }
+smol = { version = "1", optional = true, default-features = false }
 tokio = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
 env_logger = { version = "0.8", default-features = false, features = ["atty", "humantime", "termcolor"] }
 structopt = { version = "0.3", default-features = false }
 tokio = { version = "1", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "signal"] }
+
+[patch.crates-io]
+async-net = { git = "https://github.com/smol-rs/async-net", rev = "fcef0a09692d03e8478fb638e7fa666d3a104e5d" }
 
 [features]
 client = [
@@ -35,6 +39,9 @@ client = [
 server = [
 	"futures-util/std", # for futures_util::stream::FuturesUnordered
 	"_common",
+]
+transport-smol = [
+	"smol",
 ]
 transport-tokio = [
 	"tokio",

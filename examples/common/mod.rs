@@ -1,3 +1,6 @@
+#[cfg(feature = "transport-smol")]
+pub(crate) mod smol;
+
 #[cfg(feature = "transport-tokio")]
 pub(crate) mod tokio;
 
