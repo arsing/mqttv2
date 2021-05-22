@@ -12,15 +12,17 @@ enum ReadState {
 }
 
 struct WriteState {
-    prev: std::collections::VecDeque<bytes::Bytes>,
+    prev: std::collections::VecDeque<Bytes>,
     curr: bytes::BytesMut,
+    pool: Vec<bytes::BytesMut>,
 }
 
 impl WriteState {
     /// Returns true if there is something to write.
     fn prepare_for_write(&mut self) -> bool {
         if !self.curr.is_empty() && self.prev.len() < NUM_IO_SLICES {
-            self.prev.push_back(self.curr.split().freeze());
+            let curr = std::mem::replace(&mut self.curr, self.pool.pop().unwrap_or_default());
+            self.prev.push_back(Bytes::Pool(curr));
         }
 
         !self.prev.is_empty()
@@ -43,6 +45,12 @@ impl WriteState {
             }
 
             cnt -= buf.len();
+            if let Bytes::Pool(mut b) = buf {
+                if self.pool.len() < NUM_IO_SLICES {
+                    b.clear();
+                    self.pool.push(b);
+                }
+            }
         }
         assert_eq!(cnt, 0);
     }
@@ -53,7 +61,8 @@ impl Default for WriteState {
         WriteState {
             // prev will receive at least one more packet even when it has NUM_IO_SLICES buffers, so space for more buffers
             prev: std::collections::VecDeque::with_capacity(NUM_IO_SLICES * 2),
-            curr: bytes::BytesMut::with_capacity(1024),
+            curr: bytes::BytesMut::with_capacity(32),
+            pool: vec![],
         }
     }
 }
@@ -69,9 +78,35 @@ impl mqtt3::proto::ByteBuf for WriteState {
 
     fn put_bytes(&mut self, src: bytes::Bytes) {
         if !self.curr.is_empty() {
-            self.prev.push_back(std::mem::take(&mut self.curr).freeze());
+            let curr = std::mem::replace(&mut self.curr, self.pool.pop().unwrap_or_default());
+            self.prev.push_back(Bytes::Pool(curr));
         }
-        self.prev.push_back(src);
+        self.prev.push_back(Bytes::Frozen(src));
+    }
+}
+
+enum Bytes {
+    Frozen(bytes::Bytes),
+    Pool(bytes::BytesMut),
+}
+
+impl Bytes {
+    fn advance(&mut self, cnt: usize) {
+        match self {
+            Bytes::Frozen(b) => b.advance(cnt),
+            Bytes::Pool(b) => b.advance(cnt),
+        }
+    }
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Bytes::Frozen(b) => &**b,
+            Bytes::Pool(b) => &**b,
+        }
     }
 }
 
