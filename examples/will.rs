@@ -67,11 +67,6 @@ struct Options {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    env_logger::Builder::from_env(
-        env_logger::Env::new().filter_or("MQTT3_LOG", "mqtt3=debug,mqtt3::io=trace,will=info"),
-    )
-    .init();
-
     let Options {
         server,
         client_id,
@@ -82,7 +77,7 @@ async fn main() {
         topic,
         qos,
         payload,
-    } = structopt::StructOpt::from_args();
+    } = common::init("will");
 
     let will = mqtt3::proto::Publication {
         topic_name: topic.clone(),
@@ -98,7 +93,7 @@ async fn main() {
         move || {
             let password = password.clone();
             Box::pin(async move {
-                let (stream, sink) = common::tokio::connect(server).await?;
+                let (stream, sink) = common::transport::tokio::connect(server).await?;
                 Ok::<_, std::io::Error>((stream, sink, password))
             })
         },
