@@ -1,5 +1,6 @@
 mod common;
 
+use std::convert::TryInto;
 use std::io::{Read, Write};
 
 #[derive(Debug, structopt::StructOpt)]
@@ -40,7 +41,7 @@ fn main() {
     let publish = encode(mqtt3::proto::Packet::Publish(mqtt3::proto::Publish {
         packet_identifier_dup_qos: mqtt3::proto::PacketIdentifierDupQoS::AtMostOnce,
         retain: false,
-        topic_name: "foo".to_owned().into(),
+        topic_name: "foo".to_owned().try_into().unwrap(),
         payload,
     }));
     let mut publish_buf = Vec::with_capacity(8192);

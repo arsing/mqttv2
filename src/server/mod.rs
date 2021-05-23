@@ -1,3 +1,5 @@
+use std::convert::TryInto;
+
 use futures_sink::Sink;
 use futures_util::{FutureExt, SinkExt, StreamExt, TryStreamExt};
 
@@ -212,7 +214,9 @@ impl<L> ServerState<L> where L: crate::io::Listener {
     ) -> crate::proto::ByteStr {
         let client_id = match client_id {
             crate::proto::ClientId::ServerGenerated => {
-                let client_id = format!("server-generated-{}", self.next_server_generated_session_id).into();
+                let client_id =
+                    format!("server-generated-{}", self.next_server_generated_session_id)
+                    .try_into().expect("this string will not be long enough to exceed u16::max_value() bytes");
                 self.next_server_generated_session_id += 1;
                 client_id
             },
