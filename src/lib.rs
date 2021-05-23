@@ -10,6 +10,7 @@
     clippy::let_underscore_drop,
     clippy::let_unit_value,
     clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
     clippy::module_name_repetitions,
     clippy::must_use_candidate,
     clippy::pub_enum_variant_names,
@@ -18,7 +19,7 @@
 )]
 
 #[allow(clippy::declare_interior_mutable_const)]
-pub const PROTOCOL_NAME: proto::ByteStr = proto::ByteStr::from_static("MQTT");
+pub const PROTOCOL_NAME: proto::ByteStr = proto::ByteStr::from_length_prefixed_static("\x00\x04MQTT");
 
 pub const PROTOCOL_LEVEL: u8 = 0x04;
 

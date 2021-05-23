@@ -1,72 +1,131 @@
-#[derive(Clone, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ByteStr(pub(super) bytes::Bytes);
+use std::convert::{TryFrom, TryInto};
+
+/// Strings are prefixed with a two-byte big-endian length and are encoded as utf-8.
+///
+/// Ref: 1.5.3 UTF-8 encoded strings
+#[derive(Clone)]
+pub struct ByteStr(bytes::Bytes);
 
 impl ByteStr {
     #[allow(clippy::declare_interior_mutable_const)]
-    pub const EMPTY: Self = Self::from_static("");
+    pub const EMPTY: Self = ByteStr(bytes::Bytes::from_static(b"\x00\x00"));
 
-    pub const fn from_static(s: &'static str) -> Self {
+    pub const fn from_length_prefixed_static(s: &'static str) -> Self {
         ByteStr(bytes::Bytes::from_static(s.as_bytes()))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.0[std::mem::size_of::<u16>()..]
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        u16::from_be_bytes(self.0[..std::mem::size_of::<u16>()].try_into().unwrap()).into()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0 == b"\x00\x00"[..]
+    }
+
+    pub fn decode(src: &mut bytes::BytesMut) -> Result<Option<ByteStr>, super::DecodeError> {
+        if src.len() < std::mem::size_of::<u16>() {
+            return Ok(None);
+        }
+
+        let len: usize =
+            u16::from_be_bytes(src[..std::mem::size_of::<u16>()].try_into().unwrap()).into();
+
+        if src.len() < std::mem::size_of::<u16>() + len {
+            return Ok(None);
+        }
+
+        let s = src.split_to(std::mem::size_of::<u16>() + len).freeze();
+        Ok(Some(ByteStr(s)))
+    }
+
+    pub fn encode<B>(self, dst: &mut B) where B: super::ByteBuf {
+        dst.put_bytes(self.0);
     }
 }
 
 impl AsRef<str> for ByteStr {
     fn as_ref(&self) -> &str {
-        unsafe { std::str::from_utf8_unchecked(&self.0) }
+        unsafe { std::str::from_utf8_unchecked(self.as_bytes()) }
     }
 }
 
 impl std::fmt::Debug for ByteStr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = unsafe { std::str::from_utf8_unchecked(&self.0) };
-        s.fmt(f)
+        self.as_ref().fmt(f)
+    }
+}
+
+impl Default for ByteStr {
+    fn default() -> Self {
+        ByteStr::EMPTY
     }
 }
 
 impl std::fmt::Display for ByteStr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = unsafe { std::str::from_utf8_unchecked(&self.0) };
-        s.fmt(f)
+        self.as_ref().fmt(f)
     }
 }
 
-impl From<String> for ByteStr {
-    fn from(s: String) -> Self {
-        ByteStr(s.into())
+impl TryFrom<String> for ByteStr {
+    type Error = <u16 as TryFrom<usize>>::Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        let len = u16::to_be_bytes(s.len().try_into()?);
+        let mut s = s.into_bytes();
+        s.splice(..0, std::array::IntoIter::new(len));
+        Ok(ByteStr(s.into()))
     }
 }
 
 impl std::str::FromStr for ByteStr {
-    type Err = std::convert::Infallible;
+    type Err = <Self as TryFrom<String>>::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(ByteStr(s.to_owned().into()))
+        let len = u16::to_be_bytes(s.len().try_into()?);
+        let s: Vec<_> = std::array::IntoIter::new(len).chain(s.as_bytes().iter().copied()).collect();
+        Ok(ByteStr(s.into()))
+    }
+}
+
+impl PartialEq for ByteStr {
+    fn eq(&self, other: &Self) -> bool {
+        let s: &str = self.as_ref();
+        let other: &str = other.as_ref();
+        s.eq(other)
+    }
+}
+
+impl Eq for ByteStr {}
+
+impl PartialOrd for ByteStr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let s: &str = self.as_ref();
+        let other: &str = other.as_ref();
+        s.partial_cmp(other)
+    }
+}
+
+impl Ord for ByteStr {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let s: &str = self.as_ref();
+        let other: &str = other.as_ref();
+        s.cmp(other)
     }
 }
 
 impl<'a> PartialEq<&'a str> for ByteStr {
     fn eq(&self, other: &&'a str) -> bool {
-        (&*self.0).eq(other.as_bytes())
+        self.as_ref().eq(*other)
     }
 }
 
-impl std::convert::TryFrom<bytes::Bytes> for ByteStr {
-    type Error = std::str::Utf8Error;
-
-    fn try_from(b: bytes::Bytes) -> Result<Self, Self::Error> {
-        let _ = std::str::from_utf8(&b)?;
-        Ok(ByteStr(b))
+impl std::hash::Hash for ByteStr {
+    fn hash<H>(&self, state: &mut H) where H: std::hash::Hasher {
+        self.as_ref().hash(state)
     }
 }

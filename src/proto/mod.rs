@@ -2,8 +2,6 @@
  * MQTT protocol types.
  */
 
-use std::convert::TryInto;
-
 use bytes::Buf;
 
 mod byte_str;
@@ -86,62 +84,6 @@ impl From<ConnectReturnCode> for u8 {
             ConnectReturnCode::Refused(ConnectionRefusedReason::Other(code)) => code,
         }
     }
-}
-
-/// A tokio decoder of MQTT-format strings.
-///
-/// Strings are prefixed with a two-byte big-endian length and are encoded as utf-8.
-///
-/// Ref: 1.5.3 UTF-8 encoded strings
-#[derive(Debug)]
-pub enum Utf8StringDecoder {
-    Empty,
-    HaveLength(usize),
-}
-
-impl Default for Utf8StringDecoder {
-    fn default() -> Self {
-        Utf8StringDecoder::Empty
-    }
-}
-
-fn decode_utf8_str(decoder: &mut Utf8StringDecoder, src: &mut bytes::BytesMut) -> Result<Option<ByteStr>, DecodeError> {
-    loop {
-        match decoder {
-            Utf8StringDecoder::Empty => {
-                let len = match src.try_get_u16_be() {
-                    Ok(len) => len as usize,
-                    Err(_) => return Ok(None),
-                };
-                *decoder = Utf8StringDecoder::HaveLength(len);
-            }
-
-            Utf8StringDecoder::HaveLength(len) => {
-                if src.len() < *len {
-                    return Ok(None);
-                }
-
-                let s = src.split_to(*len).freeze().try_into().map_err(DecodeError::StringNotUtf8)?;
-                *decoder = Utf8StringDecoder::Empty;
-                return Ok(Some(s));
-            }
-        }
-    }
-}
-
-fn encode_utf8_str<B>(item: ByteStr, dst: &mut B) -> Result<(), EncodeError>
-where
-    B: ByteBuf,
-{
-    let len = item.len();
-    dst.put_u16_bytes(
-        len.try_into()
-            .map_err(|_| EncodeError::StringTooLarge(len))?,
-    );
-
-    dst.put_bytes(item.0);
-
-    Ok(())
 }
 
 /// A tokio decoder for MQTT-format "remaining length" numbers.

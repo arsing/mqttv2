@@ -1,4 +1,4 @@
-use std::{convert::TryInto, time::Duration};
+use std::convert::TryInto;
 
 use bytes::Buf;
 
@@ -129,7 +129,7 @@ pub struct Connect {
     pub password: Option<crate::proto::ByteStr>,
     pub will: Option<Publication>,
     pub client_id: super::ClientId,
-    pub keep_alive: Duration,
+    pub keep_alive: std::time::Duration,
     pub protocol_name: crate::proto::ByteStr,
     pub protocol_level: u8,
 }
@@ -158,7 +158,7 @@ impl PacketMeta for Connect {
         }
 
         let protocol_name =
-            super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
+            crate::proto::ByteStr::decode(&mut src)?
             .ok_or(super::DecodeError::IncompletePacket)?;
         #[allow(clippy::borrow_interior_mutable_const)]
         if protocol_name != crate::PROTOCOL_NAME {
@@ -172,10 +172,10 @@ impl PacketMeta for Connect {
             return Err(super::DecodeError::ConnectReservedSet);
         }
 
-        let keep_alive = Duration::from_secs(u64::from(src.try_get_u16_be()?));
+        let keep_alive = std::time::Duration::from_secs(u64::from(src.try_get_u16_be()?));
 
         let client_id =
-            super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
+            crate::proto::ByteStr::decode(&mut src)?
             .ok_or(super::DecodeError::IncompletePacket)?;
         let client_id = if client_id.is_empty() {
             if connect_flags & 0x02 == 0 {
@@ -192,7 +192,7 @@ impl PacketMeta for Connect {
             None
         } else {
             let topic_name =
-                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
+                crate::proto::ByteStr::decode(&mut src)?
                 .ok_or(super::DecodeError::IncompletePacket)?;
 
             let qos = match connect_flags & 0x18 {
@@ -222,7 +222,7 @@ impl PacketMeta for Connect {
             None
         } else {
             Some(
-                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
+                crate::proto::ByteStr::decode(&mut src)?
                     .ok_or(super::DecodeError::IncompletePacket)?,
             )
         };
@@ -231,7 +231,7 @@ impl PacketMeta for Connect {
             None
         } else {
             Some(
-                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
+                crate::proto::ByteStr::decode(&mut src)?
                     .ok_or(super::DecodeError::IncompletePacket)?,
             )
         };
@@ -261,7 +261,7 @@ impl PacketMeta for Connect {
             protocol_level,
         } = self;
 
-        super::encode_utf8_str(protocol_name, dst)?;
+        protocol_name.encode(dst);
 
         dst.put_u8_bytes(protocol_level);
 
@@ -302,13 +302,13 @@ impl PacketMeta for Connect {
 
         match client_id {
             #[allow(clippy::borrow_interior_mutable_const)]
-            super::ClientId::ServerGenerated => super::encode_utf8_str(crate::proto::ByteStr::EMPTY, dst)?,
+            super::ClientId::ServerGenerated => crate::proto::ByteStr::EMPTY.encode(dst),
             super::ClientId::IdWithCleanSession(id)
-            | super::ClientId::IdWithExistingSession(id) => super::encode_utf8_str(id, dst)?,
+            | super::ClientId::IdWithExistingSession(id) => id.encode(dst),
         }
 
         if let Some(will) = will {
-            super::encode_utf8_str(will.topic_name, dst)?;
+            will.topic_name.encode(dst);
 
             let will_len = will.payload.len();
             dst.put_u16_bytes(
@@ -321,11 +321,11 @@ impl PacketMeta for Connect {
         }
 
         if let Some(username) = username {
-            super::encode_utf8_str(username, dst)?;
+            username.encode(dst);
         }
 
         if let Some(password) = password {
-            super::encode_utf8_str(password, dst)?;
+            password.encode(dst);
         }
 
         Ok(())
@@ -497,7 +497,7 @@ impl PacketMeta for Publish {
         let retain = (flags & 0x01) != 0;
 
         let topic_name =
-            super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
+            crate::proto::ByteStr::decode(&mut src)?
             .ok_or(super::DecodeError::IncompletePacket)?;
 
         let packet_identifier_dup_qos = match (flags & 0x06) >> 1 {
@@ -540,7 +540,7 @@ impl PacketMeta for Publish {
             payload,
         } = self;
 
-        super::encode_utf8_str(topic_name, dst)?;
+        topic_name.encode(dst);
 
         match packet_identifier_dup_qos {
             PacketIdentifierDupQoS::AtMostOnce => (),
@@ -711,7 +711,7 @@ impl PacketMeta for Subscribe {
 
         while !src.is_empty() {
             let topic_filter =
-                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
+                crate::proto::ByteStr::decode(&mut src)?
                 .ok_or(super::DecodeError::IncompletePacket)?;
             let qos = match src.try_get_u8()? {
                 0x00 => QoS::AtMostOnce,
@@ -744,7 +744,7 @@ impl PacketMeta for Subscribe {
         dst.put_packet_identifier_bytes(packet_identifier);
 
         for SubscribeTo { topic_filter, qos } in subscribe_to {
-            super::encode_utf8_str(topic_filter, dst)?;
+            topic_filter.encode(dst);
             dst.put_u8_bytes(qos.into());
         }
 
@@ -810,7 +810,7 @@ impl PacketMeta for Unsubscribe {
 
         while !src.is_empty() {
             unsubscribe_from.push(
-                super::decode_utf8_str(&mut super::Utf8StringDecoder::default(), &mut src)?
+                crate::proto::ByteStr::decode(&mut src)?
                     .ok_or(super::DecodeError::IncompletePacket)?,
             );
         }
@@ -837,7 +837,7 @@ impl PacketMeta for Unsubscribe {
         dst.put_packet_identifier_bytes(packet_identifier);
 
         for unsubscribe_from in unsubscribe_from {
-            super::encode_utf8_str(unsubscribe_from, dst)?;
+            unsubscribe_from.encode(dst);
         }
 
         Ok(())
