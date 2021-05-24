@@ -63,7 +63,7 @@ fn main() {
     loop {
         let _ = stream.write_all(publish).unwrap();
 
-        packet_stats.count(num_publish_packets_per_write);
+        packet_stats.update(num_publish_packets_per_write, publish.len());
     }
 }
 

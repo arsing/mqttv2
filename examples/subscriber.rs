@@ -124,7 +124,7 @@ async fn main() {
                 ),
             }
 
-            packet_stats.count(1);
+            packet_stats.update(1, publication.payload.len());
         }
     }
 }
