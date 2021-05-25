@@ -1,3 +1,7 @@
+use std::{thread, time::Duration};
+
+use systemstat::{saturating_sub_bytes, Platform, System};
+
 #[cfg(any(feature = "transport-smol", feature = "transport-tokio",))]
 pub(crate) mod transport;
 
@@ -37,24 +41,6 @@ pub(crate) fn qos_from_str(s: &str) -> Result<mqtt3::proto::QoS, String> {
     }
 }
 
-fn log_metric(metric_name: &str, metric_value: u128, elapsed_micros: u128, history: &History) {
-    log::info!(
-        "{}: {:>8} | 1s average: {:>8}/s) | {}s average: {:>8}/s{}",
-        metric_name,
-        metric_value,
-        metric_value * 1_000_000 / elapsed_micros,
-        PACKET_STATS_WINDOW_SIZE,
-        history.as_slice().iter().sum::<u128>() * 1_000_000
-            / (history.len() as u128)
-            / elapsed_micros,
-        if history.len() < PACKET_STATS_WINDOW_SIZE {
-            " (?)"
-        } else {
-            ""
-        },
-    );
-}
-
 pub(crate) const PACKET_STATS_WINDOW_SIZE: usize = 60;
 
 type History = heapless::HistoryBuffer<u128, PACKET_STATS_WINDOW_SIZE>;
@@ -70,7 +56,7 @@ pub(crate) struct PacketStats {
 
 impl PacketStats {
     #[allow(dead_code)]
-    pub(crate) fn update(&mut self, num: usize, bytes: usize) {
+    pub(crate) fn log_metrics(&mut self, num: usize, bytes: usize) {
         self.current += num as u128;
         self.bytes += bytes as u128;
 
@@ -101,6 +87,9 @@ impl PacketStats {
 
             self.bytes = 0;
             self.start_time = now;
+
+            // System metrics
+            log_sys_metrics();
         }
     }
 }
@@ -114,5 +103,94 @@ impl Default for PacketStats {
             message_history: History::new(),
             byte_history: History::new(),
         }
+    }
+}
+
+fn log_metric(metric_name: &str, metric_value: u128, elapsed_micros: u128, history: &History) {
+    log::info!(
+        "{}: {:>8} | 1s average: {:>8}/s) | {}s average: {:>8}/s{}",
+        metric_name,
+        metric_value,
+        metric_value * 1_000_000 / elapsed_micros,
+        PACKET_STATS_WINDOW_SIZE,
+        history.as_slice().iter().sum::<u128>() * 1_000_000
+            / (history.len() as u128)
+            / elapsed_micros,
+        if history.len() < PACKET_STATS_WINDOW_SIZE {
+            " (?)"
+        } else {
+            ""
+        },
+    );
+}
+
+fn log_sys_metrics() {
+    let sys = System::new();
+
+    match sys.networks() {
+        Ok(netifs) => {
+            log::info!("Networks:");
+            for netif in netifs.values() {
+                log::info!("{} ({:?})", netif.name, netif.addrs);
+            }
+        }
+        Err(x) => log::info!("Networks: error: {}", x),
+    }
+
+    match sys.networks() {
+        Ok(netifs) => {
+            log::info!("Network interface statistics:");
+            for netif in netifs.values() {
+                log::info!(
+                    "{} statistics: ({:?})",
+                    netif.name,
+                    sys.network_stats(&netif.name)
+                );
+            }
+        }
+        Err(x) => log::info!("Networks: error: {}", x),
+    }
+
+    match sys.memory() {
+        Ok(mem) => log::info!(
+            "Memory: {} used / {} ({} bytes) total ({:?})",
+            saturating_sub_bytes(mem.total, mem.free),
+            mem.total,
+            mem.total.as_u64(),
+            mem.platform_memory
+        ),
+        Err(x) => log::info!("Memory: error: {}", x),
+    }
+
+    match sys.load_average() {
+        Ok(loadavg) => log::info!(
+            "Load average: {} {} {}",
+            loadavg.one,
+            loadavg.five,
+            loadavg.fifteen
+        ),
+        Err(x) => log::info!("Load average: error: {}", x),
+    }
+
+    match sys.cpu_load_aggregate() {
+        Ok(cpu) => {
+            log::info!("Measuring CPU load...");
+            thread::sleep(Duration::from_secs(1));
+            let cpu = cpu.done().unwrap();
+            log::info!(
+                "CPU load: {}% user, {}% nice, {}% system, {}% intr, {}% idle ",
+                cpu.user * 100.0,
+                cpu.nice * 100.0,
+                cpu.system * 100.0,
+                cpu.interrupt * 100.0,
+                cpu.idle * 100.0
+            );
+        }
+        Err(x) => log::info!("CPU load: error: {}", x),
+    }
+
+    match sys.socket_stats() {
+        Ok(stats) => log::info!("System socket statistics: {:?}", stats),
+        Err(x) => log::info!("System socket statistics: error: {}", x.to_string()),
     }
 }
