@@ -10,7 +10,8 @@ mod common;
 
 #[derive(Debug, structopt::StructOpt)]
 struct Options {
-    #[structopt(help = "Address of the MQTT server.", long)]
+    /// Address of the MQTT server.
+    #[structopt(long, default_value = "[::]:1883")]
     bind: std::net::SocketAddr,
 }
 

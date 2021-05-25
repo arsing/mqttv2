@@ -9,8 +9,8 @@
 //
 // Example:
 //
-//     cargo run --features client --example will -- --server 127.0.0.1:1883 --client-id 'example-will-1' --topic foo --qos 1 --payload '"goodbye, world"  - example-will-1'
-//     cargo run --features client --example will -- --server 127.0.0.1:1883 --client-id 'example-will-2' --topic foo --qos 1 --payload '"goodbye, world"  - example-will-2'
+//     cargo run --features client --example will -- --client-id 'example-will-1' --topic foo --qos 1 --payload '"goodbye, world"  - example-will-1'
+//     cargo run --features client --example will -- --client-id 'example-will-2' --topic foo --qos 1 --payload '"goodbye, world"  - example-will-2'
 
 use futures_util::StreamExt;
 
@@ -18,50 +18,40 @@ mod common;
 
 #[derive(Debug, structopt::StructOpt)]
 struct Options {
-    #[structopt(help = "Address of the MQTT server.", long = "server")]
+    /// Address of the MQTT server.
+    #[structopt(long)]
     server: std::net::SocketAddr,
 
-    #[structopt(
-        help = "Client ID used to identify this application to the server. If not given, a server-generated ID will be used.",
-        long = "client-id"
-    )]
+    /// Client ID used to identify this application to the server. If not given, a server-generated ID will be used.
+    #[structopt(long)]
     client_id: Option<mqtt3::proto::ByteStr>,
 
-    #[structopt(
-        help = "Username used to authenticate with the server, if any.",
-        long = "username"
-    )]
+    /// Username used to authenticate with the server, if any.
+    #[structopt(long)]
     username: Option<mqtt3::proto::ByteStr>,
 
-    #[structopt(
-        help = "Password used to authenticate with the server, if any.",
-        long = "password"
-    )]
+    /// Password used to authenticate with the server, if any.
+    #[structopt(long)]
     password: Option<mqtt3::proto::ByteStr>,
 
-    #[structopt(
-		help = "Maximum back-off time between reconnections to the server, in seconds.",
-		long = "max-reconnect-back-off",
-		default_value = "30",
-		parse(try_from_str = common::duration_from_secs_str),
-	)]
+    /// Maximum back-off time between reconnections to the server, in seconds.
+    #[structopt(long, default_value = "30", parse(try_from_str = common::duration_from_secs_str))]
     max_reconnect_back_off: std::time::Duration,
 
-    #[structopt(
-		help = "Keep-alive time advertised to the server, in seconds.",
-		long = "keep-alive",
-		default_value = "5",
-		parse(try_from_str = common::duration_from_secs_str),
-	)]
+    /// Keep-alive time advertised to the server, in seconds.
+    #[structopt(long, default_value = "5", parse(try_from_str = common::duration_from_secs_str))]
     keep_alive: std::time::Duration,
 
-    #[structopt(help = "The topic of the will.", long = "topic")]
+    /// The topic of the will.
+    #[structopt(long)]
     topic: mqtt3::proto::ByteStr,
 
-    #[structopt(help = "The QoS of the will.", long = "qos", parse(try_from_str = common::qos_from_str))]
+    /// The QoS of the will.
+    #[structopt(long, parse(try_from_str = common::qos_from_str))]
     qos: mqtt3::proto::QoS,
 
-    #[structopt(help = "The payload of the will.", long = "payload")]
+    /// The payload of the will.
+    #[structopt(long)]
     payload: String,
 }
 

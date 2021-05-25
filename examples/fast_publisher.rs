@@ -1,3 +1,7 @@
+// Example:
+//
+//     cargo run --release --example fast_publisher -- --payload-len 32
+
 mod common;
 
 use std::convert::TryInto;
@@ -5,10 +9,12 @@ use std::io::{Read, Write};
 
 #[derive(Debug, structopt::StructOpt)]
 struct Options {
-    #[structopt(help = "Address of the MQTT server.", long = "server", default_value = "[::]:1883")]
+    /// Address of the MQTT server.
+    #[structopt(long, default_value = "[::1]:1883")]
     server: std::net::SocketAddr,
 
-    #[structopt(help = "The length of the payload.", long = "payload-len")]
+    /// The length of the payload.
+    #[structopt(long)]
     payload_len: usize,
 }
 
