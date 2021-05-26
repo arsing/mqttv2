@@ -73,12 +73,19 @@ fn main() {
         let () = stream.read_exact(&mut recv).unwrap();
         let finish_recv_time = std::time::Instant::now();
         assert_eq!(recv, *publish);
+
+        let ping_time = finish_recv_time - finish_send_time;
+
         log::info!(
             "start_send = {:?}, finish_send = {:?} (+{}ms), finish_recv = {:?} (+{}ms)",
             start_send_time,
             finish_send_time, (finish_send_time - start_send_time).as_millis(),
-            finish_recv_time, (finish_recv_time - finish_send_time).as_millis(),
+            finish_recv_time, ping_time.as_millis(),
         );
+
+        if ping_time <= std::time::Duration::from_secs(1) {
+            std::thread::sleep(std::time::Duration::from_secs(1) - ping_time);
+        }
     }
 }
 

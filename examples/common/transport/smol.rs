@@ -16,7 +16,7 @@ pub(crate) async fn connect(addr: impl smol::net::AsyncToSocketAddrs) -> std::io
     let sink = IoSink {
         io: smol::net::TcpStream::from_std(sink)?,
         write_state: Default::default(),
-        buffer_timeout: smol::Time::after(super::BUFFER_TIME),
+        buffer_timeout: None,
     };
 
     Ok(mqtt3::io::logging(stream, sink))
@@ -62,7 +62,7 @@ impl mqtt3::io::Listener for Listener {
         let sink = IoSink {
             io: stream,
             write_state: Default::default(),
-            buffer_timeout: smol::Timer::after(super::BUFFER_TIME),
+            buffer_timeout: None,
         };
 
         std::task::Poll::Ready(Ok(mqtt3::io::logging(stream_, sink)))
@@ -140,7 +140,7 @@ fn as_read_buf(buf: &'_ mut bytes::BytesMut) -> &'_ mut [u8] {
 pub(crate) struct IoSink<Io> {
     #[pin] io: Io,
     write_state: super::WriteState,
-    buffer_timeout: smol::Timer,
+    buffer_timeout: Option<smol::Timer>,
 }
 
 impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: smol::io::AsyncWrite {
@@ -168,7 +168,8 @@ impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: smol:
             if this.write_state.prev.len() < super::NUM_IO_SLICES {
                 use std::future::Future;
 
-                match std::pin::Pin::new(&mut *this.buffer_timeout).poll(cx) {
+                let buffer_timeout = this.buffer_timeout.get_or_insert_with(|| smol::Timer::after(super::BUFFER_TIME));
+                match std::pin::Pin::new(buffer_timeout).poll(cx) {
                     std::task::Poll::Ready(_) => (),
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                 }
@@ -190,7 +191,7 @@ impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: smol:
             }
         }
 
-        this.buffer_timeout.set_after(super::BUFFER_TIME);
+        *this.buffer_timeout = None;
         std::task::Poll::Ready(Ok(()))
     }
 
