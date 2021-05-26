@@ -175,13 +175,16 @@ impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: smol:
                 }
             }
 
-            while this.write_state.prepare_for_write() {
+            loop {
                 let mut dst = [std::io::IoSlice::new(b""); super::NUM_IO_SLICES];
                 let num_chunks = this.write_state.chunks_vectored(&mut dst);
                 match this.io.as_mut().poll_write_vectored(cx, &dst[..num_chunks])? {
                     std::task::Poll::Ready(0) => return std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())),
                     std::task::Poll::Ready(written) => this.write_state.advance(written),
                     std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
+                if !this.write_state.prepare_for_write() {
+                    break;
                 }
             }
 
