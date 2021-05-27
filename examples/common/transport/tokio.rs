@@ -16,7 +16,7 @@ pub(crate) async fn connect(addr: impl tokio::net::ToSocketAddrs) -> std::io::Re
     let sink = IoSink {
         io: tokio::net::TcpStream::from_std(sink)?,
         write_state: Default::default(),
-        buffer_timeout: Box::pin(tokio::time::sleep(super::BUFFER_TIME)),
+        buffer_timeout: None,
     };
 
     Ok(mqtt3::io::logging(stream, sink))
@@ -58,7 +58,7 @@ impl mqtt3::io::Listener for Listener {
         let sink = IoSink {
             io: tokio::net::TcpStream::from_std(sink)?,
             write_state: Default::default(),
-            buffer_timeout: Box::pin(tokio::time::sleep(super::BUFFER_TIME)),
+            buffer_timeout: None,
         };
 
         std::task::Poll::Ready(Ok(mqtt3::io::logging(stream, sink)))
@@ -132,7 +132,7 @@ fn as_read_buf(buf: &'_ mut bytes::BytesMut) -> tokio::io::ReadBuf<'_> {
 pub(crate) struct IoSink<Io> {
     #[pin] io: Io,
     write_state: super::WriteState,
-    buffer_timeout: std::pin::Pin<Box<tokio::time::Sleep>>,
+    buffer_timeout: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: tokio::io::AsyncWrite {
@@ -160,19 +160,23 @@ impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: tokio
             if this.write_state.prev.len() < super::NUM_IO_SLICES {
                 use std::future::Future;
 
-                match this.buffer_timeout.as_mut().poll(cx) {
+                let buffer_timeout = this.buffer_timeout.get_or_insert_with(|| Box::pin(tokio::time::sleep(super::BUFFER_TIME)));
+                match buffer_timeout.as_mut().poll(cx) {
                     std::task::Poll::Ready(()) => (),
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                 }
             }
 
-            while this.write_state.prepare_for_write() {
+            loop {
                 let mut dst = [std::io::IoSlice::new(b""); super::NUM_IO_SLICES];
                 let num_chunks = this.write_state.chunks_vectored(&mut dst);
                 match this.io.as_mut().poll_write_vectored(cx, &dst[..num_chunks])? {
                     std::task::Poll::Ready(0) => return std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())),
                     std::task::Poll::Ready(written) => this.write_state.advance(written),
                     std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
+                if !this.write_state.prepare_for_write() {
+                    break;
                 }
             }
 
@@ -182,7 +186,7 @@ impl<Io> futures_sink::Sink<mqtt3::proto::Packet> for IoSink<Io> where Io: tokio
             }
         }
 
-        this.buffer_timeout.as_mut().reset(tokio::time::Instant::now() + super::BUFFER_TIME);
+        *this.buffer_timeout = None;
         std::task::Poll::Ready(Ok(()))
     }
 

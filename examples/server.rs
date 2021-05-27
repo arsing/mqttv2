@@ -35,7 +35,7 @@ fn main() {
     let bind = init();
     let listener = local_set.block_on(&runtime, common::transport::tokio::Listener::bind(bind)).expect("bind failed");
 
-    let () = local_set.block_on(&runtime, tokio::task::unconstrained(mqtt3::server::run(listener))).expect("server failed");
+    let () = local_set.block_on(&runtime, mqtt3::server::run(listener)).expect("server failed");
 }
 
 fn init() -> std::net::SocketAddr {
